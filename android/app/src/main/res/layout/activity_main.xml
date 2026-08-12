@@ -1,0 +1,460 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#05070C"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:text="MOTONAV"
+            android:textSize="28sp"
+            android:textStyle="bold"
+            android:textColor="#3BA9E0"
+            android:fontFamily="monospace"
+            android:letterSpacing="0.18"
+            android:layout_marginTop="6dp"/>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:text="share a Maps link → ride"
+            android:textSize="12sp"
+            android:textColor="#5C6B7D"
+            android:layout_marginBottom="18dp"/>
+
+        <!-- connection -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/card"
+            android:padding="14dp"
+            android:layout_marginBottom="14dp">
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+                <TextView
+                    android:id="@+id/linkDot"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="●"
+                    android:textSize="14sp"
+                    android:textColor="#FF6D00"/>
+                <TextView
+                    android:id="@+id/linkText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="NOT CONNECTED"
+                    android:textSize="13sp"
+                    android:textStyle="bold"
+                    android:fontFamily="monospace"
+                    android:textColor="#FF6D00"
+                    android:layout_marginStart="8dp"/>
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/hint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text=""
+                android:textSize="11sp"
+                android:textColor="#5C6B7D"
+                android:layout_marginTop="8dp"
+                android:lineSpacingExtra="2dp"/>
+        </LinearLayout>
+
+        <!-- DESTINATION -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="DESTINATION"
+            android:textSize="10sp"
+            android:textColor="#5C6B7D"
+            android:fontFamily="monospace"
+            android:letterSpacing="0.12"
+            android:layout_marginBottom="6dp"/>
+
+        <EditText
+            android:id="@+id/destInput"
+            android:layout_width="match_parent"
+            android:layout_height="60dp"
+            android:background="@drawable/field"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:textColor="#D7E6F5"
+            android:textSize="13sp"
+            android:inputType="textMultiLine"
+            android:gravity="top|start"
+            android:hint="paste a Google Maps link, coordinates, or a place name"
+            android:textColorHint="#3A4757"
+            android:layout_marginBottom="6dp"/>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="6dp">
+
+            <Button
+                android:id="@+id/btnPaste"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="50dp"
+                android:text="PASTE"
+                android:textSize="11sp"
+                android:textColor="#8FA6BC"
+                android:background="@drawable/btn_off"
+                android:layout_marginEnd="6dp"/>
+
+            <Button
+                android:id="@+id/btnGo"
+                android:layout_width="0dp"
+                android:layout_weight="2"
+                android:layout_height="50dp"
+                android:text="START NAVIGATION"
+                android:textSize="12sp"
+                android:textStyle="bold"
+                android:textColor="#0A0C10"
+                android:background="@drawable/btn_on"/>
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/progressBlock"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone"
+            android:layout_marginBottom="8dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginBottom="4dp">
+                <TextView
+                    android:id="@+id/progPhase"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:text=""
+                    android:textSize="11sp"
+                    android:textColor="#3BA9E0"
+                    android:fontFamily="monospace"/>
+                <TextView
+                    android:id="@+id/progPct"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="0%"
+                    android:textSize="11sp"
+                    android:textColor="#3BA9E0"
+                    android:fontFamily="monospace"/>
+            </LinearLayout>
+
+            <ProgressBar
+                android:id="@+id/progBar"
+                style="?android:attr/progressBarStyleHorizontal"
+                android:layout_width="match_parent"
+                android:layout_height="8dp"
+                android:max="100"
+                android:progress="0"
+                android:progressDrawable="@drawable/progress_bar"/>
+
+            <TextView
+                android:id="@+id/progDetail"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text=""
+                android:textSize="10sp"
+                android:textColor="#5C6B7D"
+                android:layout_marginTop="3dp"/>
+        </LinearLayout>
+
+        <Button
+            android:id="@+id/btnEndNav"
+            android:layout_width="match_parent"
+            android:layout_height="50dp"
+            android:text="END NAVIGATION"
+            android:textSize="12sp"
+            android:textStyle="bold"
+            android:textColor="#FFFFFF"
+            android:background="@drawable/btn_stop"
+            android:layout_marginBottom="8dp"/>
+
+        <TextView
+            android:id="@+id/routeStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Share a Google Maps link to MotoNav, or paste one above."
+            android:textSize="11sp"
+            android:textColor="#8FA6BC"
+            android:fontFamily="monospace"
+            android:background="@drawable/card"
+            android:padding="12dp"
+            android:lineSpacingExtra="3dp"
+            android:layout_marginBottom="18dp"/>
+
+        <!-- PI -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="RASPBERRY PI"
+            android:textSize="10sp"
+            android:textColor="#5C6B7D"
+            android:fontFamily="monospace"
+            android:letterSpacing="0.12"
+            android:layout_marginBottom="6dp"/>
+
+        <TextView
+            android:id="@+id/piMetrics"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Tap REFRESH to read Pi status."
+            android:textSize="11sp"
+            android:textColor="#8FA6BC"
+            android:fontFamily="monospace"
+            android:background="@drawable/card"
+            android:padding="12dp"
+            android:lineSpacingExtra="3dp"
+            android:layout_marginBottom="6dp"/>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="14dp">
+
+            <Button
+                android:id="@+id/btnMetrics"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="44dp"
+                android:text="REFRESH"
+                android:textSize="10sp"
+                android:textColor="#8FA6BC"
+                android:background="@drawable/btn_off"
+                android:layout_marginEnd="6dp"/>
+
+            <Button
+                android:id="@+id/btnClearPiMap"
+                android:layout_width="0dp"
+                android:layout_weight="1.4"
+                android:layout_height="44dp"
+                android:text="CLEAR PI MAP"
+                android:textSize="10sp"
+                android:textColor="#8FA6BC"
+                android:background="@drawable/btn_off"/>
+        </LinearLayout>
+
+        <!-- CACHE -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="OFFLINE MAP LIBRARY"
+            android:textSize="10sp"
+            android:textColor="#5C6B7D"
+            android:fontFamily="monospace"
+            android:letterSpacing="0.12"
+            android:layout_marginBottom="6dp"/>
+
+        <TextView
+            android:id="@+id/cacheStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="empty"
+            android:textSize="11sp"
+            android:textColor="#8FA6BC"
+            android:fontFamily="monospace"
+            android:background="@drawable/card"
+            android:padding="12dp"
+            android:lineSpacingExtra="3dp"
+            android:layout_marginBottom="6dp"/>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="6dp">
+
+            <EditText
+                android:id="@+id/regionName"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="46dp"
+                android:background="@drawable/field"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp"
+                android:textColor="#D7E6F5"
+                android:textSize="13sp"
+                android:inputType="text"
+                android:hint="region to save (e.g. Bengaluru)"
+                android:textColorHint="#3A4757"
+                android:layout_marginEnd="6dp"/>
+
+            <Button
+                android:id="@+id/btnRegionDetail"
+                android:layout_width="wrap_content"
+                android:layout_height="46dp"
+                android:text="FULL"
+                android:textSize="10sp"
+                android:textColor="#8FA6BC"
+                android:background="@drawable/btn_off"/>
+        </LinearLayout>
+
+        <Button
+            android:id="@+id/btnSaveRegion"
+            android:layout_width="match_parent"
+            android:layout_height="46dp"
+            android:text="DOWNLOAD &amp; SAVE REGION"
+            android:textSize="11sp"
+            android:textColor="#0A0C10"
+            android:background="@drawable/btn_on"
+            android:layout_marginBottom="6dp"/>
+
+        <Button
+            android:id="@+id/btnClearCache"
+            android:layout_width="match_parent"
+            android:layout_height="44dp"
+            android:text="CLEAR MAP CACHE"
+            android:textSize="10sp"
+            android:textColor="#8FA6BC"
+            android:background="@drawable/btn_off"
+            android:layout_marginBottom="18dp"/>
+
+        <!-- CONNECTION SETUP -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="CONNECTION"
+            android:textSize="10sp"
+            android:textColor="#5C6B7D"
+            android:fontFamily="monospace"
+            android:letterSpacing="0.12"
+            android:layout_marginBottom="6dp"/>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="6dp">
+
+            <Button
+                android:id="@+id/modeAuto"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="44dp"
+                android:text="AUTO"
+                android:textSize="10sp"
+                android:textColor="#8FA6BC"
+                android:background="@drawable/btn_off"
+                android:layout_marginEnd="6dp"/>
+
+            <Button
+                android:id="@+id/modeWifi"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="44dp"
+                android:text="WI-FI"
+                android:textSize="10sp"
+                android:textColor="#8FA6BC"
+                android:background="@drawable/btn_off"
+                android:layout_marginEnd="6dp"/>
+
+            <Button
+                android:id="@+id/modeBt"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="44dp"
+                android:text="BT"
+                android:textSize="10sp"
+                android:textColor="#8FA6BC"
+                android:background="@drawable/btn_off"/>
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="6dp">
+
+            <EditText
+                android:id="@+id/piIp"
+                android:layout_width="0dp"
+                android:layout_weight="3"
+                android:layout_height="46dp"
+                android:background="@drawable/field"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp"
+                android:textColor="#D7E6F5"
+                android:textSize="13sp"
+                android:fontFamily="monospace"
+                android:inputType="text"
+                android:hint="192.168.43.50"
+                android:textColorHint="#3A4757"
+                android:layout_marginEnd="6dp"/>
+
+            <EditText
+                android:id="@+id/piPort"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="46dp"
+                android:background="@drawable/field"
+                android:paddingStart="10dp"
+                android:paddingEnd="10dp"
+                android:textColor="#D7E6F5"
+                android:textSize="13sp"
+                android:fontFamily="monospace"
+                android:inputType="number"
+                android:hint="9999"
+                android:textColorHint="#3A4757"/>
+        </LinearLayout>
+
+        <EditText
+            android:id="@+id/piBtName"
+            android:layout_width="match_parent"
+            android:layout_height="46dp"
+            android:background="@drawable/field"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:textColor="#D7E6F5"
+            android:textSize="13sp"
+            android:fontFamily="monospace"
+            android:inputType="text"
+            android:hint="raspberrypi  (Bluetooth name)"
+            android:textColorHint="#3A4757"
+            android:layout_marginBottom="6dp"/>
+
+        <Button
+            android:id="@+id/btnFindPi"
+            android:layout_width="match_parent"
+            android:layout_height="46dp"
+            android:text="FIND PI ON THIS NETWORK"
+            android:textSize="11sp"
+            android:textColor="#0A0C10"
+            android:background="@drawable/btn_on"
+            android:layout_marginBottom="6dp"/>
+
+        <Button
+            android:id="@+id/btnSave"
+            android:layout_width="match_parent"
+            android:layout_height="46dp"
+            android:text="SAVE"
+            android:textSize="11sp"
+            android:textColor="#8FA6BC"
+            android:background="@drawable/btn_off"
+            android:layout_marginBottom="20dp"/>
+
+    </LinearLayout>
+</ScrollView>

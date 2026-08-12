@@ -248,12 +248,6 @@ MAP_RECT = None                # last drawn map rect (for hit testing)
 MAP_BTN_ZIN = None
 MAP_BTN_ZOUT = None
 MAP_BTN_RECENTER = None
-MAP_BTN_LEFT = None
-MAP_BTN_RIGHT = None
-MAP_BTN_UP = None
-MAP_BTN_DOWN = None
-MAP_BTN_NORTH = None
-map_ever_touched = False        # has the user ever clicked on the map?
 pan_lock = threading.Lock()
 
 
@@ -261,17 +255,6 @@ def map_is_panned():
     with pan_lock:
         return (abs(map_pan["dx_m"]) > 1 or abs(map_pan["dy_m"]) > 1
                 or abs(map_pan["zoom"] - 1.0) > 0.01)
-
-
-def dim_color(color, factor=0.5):
-    """Return a dimmed/greyed version of a color by blending with a dark base."""
-    r, g, b = color
-    # Blend towards a dark grey (40, 40, 40) by factor
-    base = 40
-    nr = int(r * factor + base * (1 - factor))
-    ng = int(g * factor + base * (1 - factor))
-    nb = int(b * factor + base * (1 - factor))
-    return (max(0, min(255, nr)), max(0, min(255, ng)), max(0, min(255, nb)))
 
 
 def map_recenter():
@@ -295,14 +278,6 @@ def map_drag(ddx_px, ddy_px, mpp):
         map_pan["touched_ms"] = time.time()
 
 
-def map_pan_by_meters(dx_m, dy_m):
-    """Pan the map programmatically by metres."""
-    with pan_lock:
-        map_pan["dx_m"] += dx_m
-        map_pan["dy_m"] += dy_m
-        map_pan["touched_ms"] = time.time()
-
-
 def map_pan_watchdog():
     """Snap back to the rider after a period with no touches."""
     while True:
@@ -323,30 +298,6 @@ STEP_MODE = False         # True once the phone sends steps (standalone nav)
 # "minimal"  = Google mode: route only, everything else greyed right back
 # "detailed" = OSM mode: full street map from the downloaded region
 map_detail = "detailed"
-MAP_SKIN = "detailed"   # detailed | minimal | light (very sparse)
-
-
-def apply_map_skin(skin):
-    """Apply a lightweight CLASS_STYLE when skin == 'light'."""
-    global MAP_SKIN
-    MAP_SKIN = skin
-    try:
-        if skin == "light":
-            if osmdata is not None:
-                osmdata.CLASS_STYLE = {
-                    1: (3, 4, True), 2: (3, 4, True), 3: (2, 3, True),
-                    4: (2, 3, False), 5: (1, 2, False), 6: (1, 2, False), 7: (1, 1, False),
-                }
-        else:
-            if osmdata is not None:
-                # restore defaults from osmdata module by reloading
-                import importlib
-                try:
-                    globals()["osmdata"] = importlib.reload(osmdata)
-                except Exception:
-                    pass
-    except Exception:
-        pass
 
 # Clock taken from the phone (the Pi has no RTC)
 phone_time = {"epoch": 0.0, "tz": None, "at": 0.0}
@@ -359,10 +310,11 @@ def now_dt():
         ep, tz, at = phone_time["epoch"], phone_time["tz"], phone_time["at"]
     if ep and at:
         drift = time.time() - at
-        utc = dt.datetime.utcfromtimestamp(ep + drift)
+        # timezone-aware UTC, then shift to the phone's offset
+        utc = dt.datetime.fromtimestamp(ep + drift, dt.timezone.utc)
         if tz is not None:
-            return utc + dt.timedelta(seconds=tz)
-        return utc
+            return (utc + dt.timedelta(seconds=tz)).replace(tzinfo=None)
+        return utc.replace(tzinfo=None)
     return dt.datetime.now()
 
 
@@ -601,7 +553,7 @@ def draw_map(surf, fonts, d, rect):
     # Map plate with rounded corners + dark GTA border
     pygame.draw.rect(surf, C["MAPBG"], rect, border_radius=6)
 
-    global MAP_RECT, map_ever_touched
+    global MAP_RECT
     MAP_RECT = rect
 
     with pan_lock:
@@ -618,7 +570,7 @@ def draw_map(surf, fonts, d, rect):
     clip = surf.get_clip()
     surf.set_clip(rect)
 
-    have_map = region is not None and region.loaded and region.covers(lat, lon)
+    have_map = tiles is not None and lat is not None and tiles.covers(lat, lon)
 
     if not have_map and not (map_detail == "minimal"):
         # fallback: faint block-grid
@@ -648,12 +600,11 @@ def draw_map(surf, fonts, d, rect):
     if have_map and not minimal:
         span_m = max(rw, rh) * MPP * 0.75
         try:
-            wids = region.nearby_ways(lat, lon, radius_m=span_m)
+            near = tiles.ways_near(lat, lon, radius_m=span_m)
             # casing pass then fill pass so junctions look right
             for style_pass in (0, 1):
-                for wi in wids:
-                    cls, pts = region.ways[wi]
-                    w_fill, w_case, major = osmdata.CLASS_STYLE.get(cls, (2, 3, False))
+                for cls, pts in near:
+                    w_fill, w_case, major = tilestore.CLASS_STYLE.get(cls, (2, 3, False))
                     if style_pass == 0:
                         col, wdt = C["ROADCASE"], w_case
                     else:
@@ -671,8 +622,7 @@ def draw_map(surf, fonts, d, rect):
     # ── minimal mode: only ghost the surrounding roads so junctions read ──
     if have_map and minimal and lat is not None:
         try:
-            for wi in region.nearby_ways(lat, lon, radius_m=max(rw, rh) * MPP * 0.6):
-                cls, wpts = region.ways[wi]
+            for cls, wpts in tiles.ways_near(lat, lon, radius_m=max(rw, rh) * MPP * 0.6):
                 if cls > 5:          # skip residential clutter entirely
                     continue
                 scr = [to_screen(p[0], p[1]) for p in wpts]
@@ -821,16 +771,11 @@ def draw_map(surf, fonts, d, rect):
             dv_, du_ = fmt_distance(d.get("distance_m"))
             text(surf, f"{dv_}{du_.lower()}", f_lbl, C["TEXT"], tx_ + 11, ty_ - 14)
 
-    # Player chevron — white with dark outline, GTA style.
-    # Draw at the GPS-mapped screen coordinate so it stays correct while panning.
+    # Player chevron — white with dark outline, GTA style
     if lat is not None:
-        try:
-            p_x, p_y = to_screen(lat, lon)
-        except Exception:
-            p_x, p_y = cx, cy
         sz = 12
-        tri = [(0, -sz), (sz * .8, sz * .85), (0, sz * .4), (-sz * .8, sz * .85)]
-        pts = [(int(p_x + a), int(p_y + b)) for a, b in tri]
+        tri = [(0, -sz), (sz*.8, sz*.85), (0, sz*.4), (-sz*.8, sz*.85)]
+        pts = [(cx + a, cy + b) for a, b in tri]
         pygame.draw.polygon(surf, C["PLAYER"], pts)
         pygame.draw.polygon(surf, C["PLAYEREDGE"], pts, 2)
     else:
@@ -839,87 +784,30 @@ def draw_map(surf, fonts, d, rect):
     rmsg = d.get("region_msg") or ""
     if rmsg:
         text(surf, rmsg, f_lbl, C["ROUTE"], rx + rw // 2, ry + 6, "center")
-        # Draw destination pin (red) inside the map, if we have a route dest
-        dest_pt = None
-        with route_lock:
-            if route_pts:
-                dest_pt = route_pts[-1]
-        if dest_pt and lat is not None:
-            try:
-                dx, dy = dest_pt
-                sx, sy = to_screen(dx, dy)
-                # only draw if within visible rect
-                if rx <= sx <= rx + rw and ry <= sy <= ry + rh:
-                    pygame.draw.circle(surf, (200, 40, 40), (int(sx), int(sy)), 6)
-                    pygame.draw.circle(surf, (255, 255, 255), (int(sx), int(sy)), 2)
-            except Exception:
-                pass
 
-        # Zoom buttons inside the map (top/right corner)
-        global MAP_BTN_ZIN, MAP_BTN_ZOUT, MAP_BTN_RECENTER, MAP_BTN_LEFT, MAP_BTN_RIGHT, MAP_BTN_UP, MAP_BTN_DOWN, MAP_BTN_NORTH
-        bs = 22
-        MAP_BTN_ZIN  = (rx + rw - bs - 8, ry + rh - bs * 2 - 9, bs, bs)
-        MAP_BTN_ZOUT = (rx + rw - bs - 8, ry + rh - bs - 5, bs, bs)
-        
-        # Determine if buttons should be active (clearly visible) or inactive (dimmed)
-        # Buttons are visible if map has ever been touched or is currently panned
-        buttons_visible = map_ever_touched or panned
-        buttons_active = panned  # Active when currently panned/zoomed
-        
-        # Draw zoom buttons only if visible
-        if buttons_visible:
-            btn_bg = C["PANEL"] if buttons_active else dim_color(C["PANEL"], 0.4)
-            btn_border = C["MAPEDGE"] if buttons_active else dim_color(C["MAPEDGE"], 0.4)
-            btn_text = C["TEXT"] if buttons_active else dim_color(C["TEXT"], 0.6)
-            for r_, lbl in ((MAP_BTN_ZIN, "+"), (MAP_BTN_ZOUT, "-")):
-                pygame.draw.rect(surf, btn_bg, r_, border_radius=3)
-                pygame.draw.rect(surf, btn_border, r_, 1, border_radius=3)
-                text(surf, lbl, f_tile, btn_text, r_[0] + bs // 2, r_[1] + 2, "center")
+    # Dark GTA map border
+    pygame.draw.rect(surf, C["MAPEDGE"], rect, 3, border_radius=6)
 
-        # Recenter button: small circular icon above the zoom buttons, always visible
-        rec_d = 20  # diameter
-        rec_x = rx + rw - bs - 8 + (bs - rec_d) // 2
-        rec_y = ry + rh - bs * 2 - 9 - rec_d - 4
-        MAP_BTN_RECENTER = (rec_x, rec_y, rec_d, rec_d)
-        
-        # Always visible - draw as a circle with bullseye pattern
-        rec_center_x = rec_x + rec_d // 2
-        rec_center_y = rec_y + rec_d // 2
-        rec_radius = rec_d // 2
-        
-        # Draw circular recenter button
-        pygame.draw.circle(surf, C["ROUTE"], (rec_center_x, rec_center_y), rec_radius)
-        pygame.draw.circle(surf, C["MAPBG"], (rec_center_x, rec_center_y), rec_radius - 4)
-        pygame.draw.circle(surf, C["ROUTE"], (rec_center_x, rec_center_y), rec_radius // 3)
+    # North indicator
+    global MAP_BTN_ZIN, MAP_BTN_ZOUT, MAP_BTN_RECENTER
+    bs = 22
+    MAP_BTN_ZIN  = (rx + rw - bs - 5, ry + rh - bs * 2 - 9, bs, bs)
+    MAP_BTN_ZOUT = (rx + rw - bs - 5, ry + rh - bs - 5, bs, bs)
+    for r_, lbl in ((MAP_BTN_ZIN, "+"), (MAP_BTN_ZOUT, "-")):
+        pygame.draw.rect(surf, C["PANEL"], r_, border_radius=3)
+        pygame.draw.rect(surf, C["MAPEDGE"], r_, 1, border_radius=3)
+        text(surf, lbl, f_tile, C["TEXT"], r_[0] + bs // 2, r_[1] + 2, "center")
 
-        # directional pan buttons (small, memory-light) placed inside map near edges
-        pbs = 18
-        inset = 8
-        # left / right: vertically centered on map side (inside)
-        MAP_BTN_LEFT = (rx + inset, ry + (rh // 2) - (pbs // 2), pbs, pbs)
-        MAP_BTN_RIGHT = (rx + rw - inset - pbs, ry + (rh // 2) - (pbs // 2), pbs, pbs)
-        # up / down: horizontally centered at top/bottom (inside)
-        MAP_BTN_UP = (rx + (rw // 2) - (pbs // 2), ry + inset, pbs, pbs)
-        MAP_BTN_DOWN = (rx + (rw // 2) - (pbs // 2), ry + rh - inset - pbs, pbs, pbs)
-        
-        # Draw directional buttons only if visible
-        if buttons_visible:
-            for r_, lbl in ((MAP_BTN_UP, "^"), (MAP_BTN_LEFT, "<"), (MAP_BTN_DOWN, "v"), (MAP_BTN_RIGHT, ">")):
-                pygame.draw.rect(surf, btn_bg, r_, border_radius=3)
-                pygame.draw.rect(surf, btn_border, r_, 1, border_radius=3)
-                text(surf, lbl, f_tile, btn_text, r_[0] + r_[2] // 2, r_[1] + 2, "center")
-
-        # North indicator on top-left of map box
-        north_inset = 8
-        north_w, north_h = 34, 18
-        MAP_BTN_NORTH = (rx + north_inset, ry + north_inset, north_w, north_h)
-        # Always visible
-        pygame.draw.rect(surf, C["PANEL2"], MAP_BTN_NORTH, border_radius=3)
-        pygame.draw.rect(surf, C["MAPEDGE"], MAP_BTN_NORTH, 1, border_radius=3)
-        text(surf, "N", f_lbl, C["MUTED"], MAP_BTN_NORTH[0] + north_w // 2, MAP_BTN_NORTH[1] + 2, "center")
-
-        # Dark GTA map border (drawn last so buttons appear inside)
-        pygame.draw.rect(surf, C["MAPEDGE"], rect, 3, border_radius=6)
+    if panned:
+        rw_ = 74
+        MAP_BTN_RECENTER = (rx + rw // 2 - rw_ // 2, ry + 5, rw_, 20)
+        pygame.draw.rect(surf, C["ROUTE"], MAP_BTN_RECENTER, border_radius=3)
+        text(surf, "RECENTER", f_lbl, C["PANEL"],
+             MAP_BTN_RECENTER[0] + rw_ // 2, MAP_BTN_RECENTER[1] + 4, "center")
+        text(surf, f"{zoom:.1f}x  north-up", f_lbl, C["MUTED"], rx + 6, ry + 6)
+    else:
+        MAP_BTN_RECENTER = None
+        text(surf, "N", f_lbl, C["MUTED"], rx + rw - 13, ry + 6, "center")
 
     # Speed badge, bottom-left inside the map
     spd = d.get("speed_kph")
@@ -1053,7 +941,7 @@ def build_frame(screen, fonts, d, flash):
         text(screen, "DESTINATION REACHED", f_lbl, C["MUTED"], SPX // 2, info_y + int(32 * sc), "center")
     elif not d["instruction"]:
         text(screen, "WAITING FOR NAV", f_sm, C["MUTED"], SPX // 2, info_y + int(12 * sc), "center")
-        text(screen, "START NAVIGATION ON YOUR PHONE", f_lbl, C["MUTED"], SPX // 2, info_y + int(34 * sc), "center")
+        text(screen, "START GOOGLE MAPS", f_lbl, C["MUTED"], SPX // 2, info_y + int(34 * sc), "center")
     else:
         dv, du = fmt_distance(d["distance_m"])
         dw = f_big.size(dv)[0]
@@ -1379,6 +1267,8 @@ def handle_message(msg, source="WIFI"):
                 route_meta["sec"] = float(msg.get("sec", 0) or 0)
             print(f"ROUTE: {len(out)} pts -> {route_meta['dest']} "
                   f"({route_meta['km']:.1f} km)")
+            threading.Thread(target=lambda: report_map_gaps(source),
+                             daemon=True).start()
         except Exception as e:
             print(f"route parse: {e}")
         return
@@ -1407,6 +1297,10 @@ def handle_message(msg, source="WIFI"):
 
     if mtype == "clear_map":
         clear_map_storage()
+        return
+
+    if mtype == "gaps_req":
+        threading.Thread(target=lambda: report_map_gaps(source), daemon=True).start()
         return
 
     if mtype == "metrics_req":
@@ -1882,12 +1776,13 @@ def signal_bars(sig):
 #  OFFLINE OSM BASEMAP
 # ══════════════════════════════════════════════════════════════════════════════
 try:
-    import osmdata
-    region = osmdata.RegionMap()
+    import tilestore
 except Exception as _e:
-    print(f"osmdata unavailable: {_e}")
-    osmdata = None
-    region = None
+    print(f"tilestore unavailable: {_e}")
+    tilestore = None
+
+MAP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "maps")
+tiles = tilestore.TileStore(MAP_DIR) if tilestore else None
 
 REGION_FILE = "region.mnosm"
 _rx_region = None
@@ -1898,27 +1793,54 @@ def region_path():
 
 
 def load_region():
-    if region is None:
+    if tiles is None:
         return False
-    p = region_path()
-    if os.path.exists(p):
-        return region.load(p)
-    print("OSM: no region file — download one from the phone app")
+    s = tiles.stats()
+    if s["tiles"]:
+        print(f"Maps: {s['tiles']} tiles, {s['ways']} roads, "
+              f"{s['bytes']//1024} KB on disk")
+        return True
+    print("Maps: no tiles yet — import a .osm.pbf or let the app fill gaps")
     return False
 
 
 def save_region_bytes(blob):
-    """Called when the phone finishes sending a region."""
-    if region is None:
+    """
+    A .mnosm blob arrived from the phone (gap fill). Split it into tiles and
+    append — existing tiles are never overwritten, only added to.
+    """
+    if tiles is None:
         return False
     try:
-        with open(region_path(), "wb") as f:
-            f.write(blob)
-        ok = region.load_bytes(blob, region_path())
-        print(f"OSM: region saved ({len(blob)} bytes) ok={ok}")
-        return ok
+        if len(blob) < 10 or blob[:6] != b"MNOSM1":
+            print("Maps: bad blob header")
+            return False
+        n_ways = struct.unpack_from("<I", blob, 6 + 32)[0]
+        off = 6 + 32 + 4
+        ways = []
+        for _ in range(n_ways):
+            if off + 3 > len(blob):
+                break
+            cls, npts = struct.unpack_from("<BH", blob, off)
+            off += 3
+            need = npts * 8
+            if off + need > len(blob):
+                break
+            pts = []
+            for i in range(npts):
+                a, b = struct.unpack_from("<ii", blob, off + i * 8)
+                pts.append((a / 1e6, b / 1e6))
+            off += need
+            if npts >= 2:
+                ways.append((cls, pts))
+        touched = tiles.store_ways(ways)
+        print(f"Maps: +{len(ways)} roads into {len(touched)} tiles "
+              f"({len(blob)//1024} KB)")
+        with nav_lock:
+            nav["region_msg"] = f"+{len(ways)} roads"
+        return True
     except Exception as e:
-        print(f"OSM: save failed {e}")
+        print(f"Maps: append failed {e}")
         return False
 
 
@@ -1970,11 +1892,62 @@ def _dir_size(path):
     return total
 
 
+
+def report_map_gaps(transport="WIFI"):
+    """
+    Work out which tiles the current route crosses that we have no data for,
+    and ask the phone to fetch just those. This is what keeps downloads small:
+    we never re-request ground we already hold.
+    """
+    if tiles is None or tilestore is None:
+        return
+    with route_lock:
+        pts = list(route_pts)
+    if len(pts) < 2:
+        return
+
+    keys = tilestore.keys_along(pts, radius_m=1500)
+    missing = tiles.missing(keys)
+    if not missing:
+        print(f"Maps: route fully covered ({len(keys)} tiles)")
+        reply(transport, {"type": "map_gaps", "boxes": [], "have": len(keys)})
+        return
+
+    # merge adjacent missing tiles into bigger boxes so the phone makes
+    # a handful of large requests instead of dozens of tiny ones
+    boxes = []
+    remaining = set(missing)
+    while remaining:
+        y, x = sorted(remaining)[0]
+        # grow east
+        x2 = x
+        while (y, x2 + 1) in remaining:
+            x2 += 1
+        # grow north while the whole row is missing
+        y2 = y
+        while all((y2 + 1, xx) in remaining for xx in range(x, x2 + 1)):
+            y2 += 1
+        for yy in range(y, y2 + 1):
+            for xx in range(x, x2 + 1):
+                remaining.discard((yy, xx))
+        s, w, _, _ = tilestore.tile_bounds((y, x))
+        _, _, n, e = tilestore.tile_bounds((y2, x2))
+        boxes.append({"s": round(s, 4), "w": round(w, 4),
+                      "n": round(n, 4), "e": round(e, 4)})
+
+    print(f"Maps: {len(missing)}/{len(keys)} tiles missing -> "
+          f"{len(boxes)} fill request(s)")
+    with nav_lock:
+        nav["region_msg"] = f"fetching {len(missing)} tiles"
+    reply(transport, {"type": "map_gaps", "boxes": boxes,
+                      "missing": len(missing), "have": len(keys) - len(missing)})
+
+
 def send_metrics(transport="WIFI"):
     """Report storage / state so the phone can display Pi metrics."""
     here = os.path.dirname(os.path.abspath(__file__))
     rpath = region_path()
-    region_bytes = _dir_size(rpath) if os.path.exists(rpath) else 0
+    region_bytes = tiles.stats()["bytes"] if tiles else 0
 
     try:
         st = os.statvfs(here)
@@ -2005,12 +1978,14 @@ def send_metrics(transport="WIFI"):
         n_route = len(route_pts)
         n_steps = len(route_steps)
         dest = route_meta.get("dest", "")
-    roads = region.info() if (region and region.loaded) else "none"
+    roads = tiles.info() if tiles else "none"
 
     payload = {
         "type": "metrics",
         "region_bytes": region_bytes,
         "region_info": roads,
+        "tiles": (tiles.stats()["tiles"] if tiles else 0),
+        "tile_ways": (tiles.stats()["ways"] if tiles else 0),
         "disk_total": disk_total,
         "disk_free": disk_free,
         "route_pts": n_route,
@@ -2027,32 +2002,19 @@ def send_metrics(transport="WIFI"):
 
 def clear_map_storage():
     """Delete the downloaded region file and drop it from memory."""
-    p = region_path()
-    n = 0
-    try:
-        if os.path.exists(p):
-            n = os.path.getsize(p)
-            os.remove(p)
-    except Exception as e:
-        print(f"clear map: {e}")
-    if region is not None:
-        try:
-            with region.lock:
-                region.ways = []
-                region.index = {}
-                region.bounds = None
-                region.path = None
-        except Exception:
-            pass
+    n = tiles.clear() if tiles else 0
     with nav_lock:
         nav["region_msg"] = "Map cleared"
     print(f"Map storage cleared ({n//1024} KB)")
 
 
 def end_navigation():
-    """Full reset: guidance, route, steps, trail and the cached map."""
+    """
+    Reset guidance, route, steps and trail. Imported map tiles are KEPT —
+    re-downloading a whole pbf import would be absurd. Use clear_map to
+    wipe tiles deliberately.
+    """
     clear_navigation("ended from phone")
-    clear_map_storage()
     map_recenter()
     with nav_lock:
         nav["region_msg"] = ""
@@ -2842,11 +2804,10 @@ def draw_settings(screen, fonts, sc):
         bt_paired = sum(1 for d in bt_state["devices"] if d["paired"])
     bt_val = bt_conn if bt_conn else (f"{bt_paired} paired" if bt_paired else "not paired")
 
-    map_val = region.info() if (region and region.loaded) else "not downloaded"
+    map_val = tiles.info() if tiles else "none"
 
     rows = [
         ("map", "Offline map", map_val),
-        ("skin", "Map skin", MAP_SKIN),
         ("wifi", "Wi-Fi", w_ssid if w_ssid else "not connected"),
         ("bt", "Bluetooth", bt_val),
         ("theme", "Theme", tmode),
@@ -3289,7 +3250,6 @@ def main():
     global theme_mode, wifi_panel_open
     global kb_open, kb_target_ssid, kb_buffer, kb_shift, kb_page, KB_SHOW
     global power_confirm, settings_open, cal_active, cal_step, bt_panel_open
-    global map_ever_touched
     print("=" * 46)
     print("  MotoNav — starting")
     print(f"  Framebuffer : {FB_DEV}")
@@ -3367,9 +3327,6 @@ def main():
             r = MAP_RECT
             inside = r and (r[0] <= ex <= r[0] + r[2] and r[1] <= ey <= r[1] + r[3])
             if kind == "down":
-                if inside and not any((settings_open, wifi_panel_open, bt_panel_open,
-                                       kb_open, power_confirm, cal_active)):
-                    map_ever_touched = True
                 drag_from = (ex, ey) if (inside and not any(
                     (settings_open, wifi_panel_open, bt_panel_open,
                      kb_open, power_confirm, cal_active))) else None
@@ -3418,14 +3375,7 @@ def main():
                         if key == "map":
                             with nav_lock:
                                 nav["region_msg"] = (
-                                    "Download from the phone app" if not (region and region.loaded)
-                                    else region.info())
-                        elif key == "skin":
-                            # cycle skins: detailed -> minimal -> light -> detailed
-                            nxt = {"detailed": "minimal", "minimal": "light", "light": "detailed"}
-                            new = nxt.get(MAP_SKIN, "detailed")
-                            apply_map_skin(new)
-                            print(f"Map skin -> {new}")
+                                    tiles.info() if tiles else "no map")
                         elif key == "wifi":
                             settings_open = False
                             wifi_panel_open = True
@@ -3542,67 +3492,18 @@ def main():
                             break
                 continue
 
-            # Check if tap is inside the map area (but not on any button)
-            r = MAP_RECT
-            if r and r[0] <= mx <= r[0] + r[2] and r[1] <= my <= r[1] + r[3]:
-                map_ever_touched = True
-            
             if _hit(PWR_CHIP):
                 power_confirm = True
                 continue
-            # directional pan buttons
-            if _hit(MAP_BTN_LEFT):
-                map_ever_touched = True
-                with pan_lock:
-                    z = map_pan["zoom"]
-                mpp = 1.3 / max(0.25, z)
-                map_drag(40, 0, mpp)
-                continue
-            if _hit(MAP_BTN_RIGHT):
-                map_ever_touched = True
-                with pan_lock:
-                    z = map_pan["zoom"]
-                mpp = 1.3 / max(0.25, z)
-                map_drag(-40, 0, mpp)
-                continue
-            if _hit(MAP_BTN_UP):
-                map_ever_touched = True
-                with pan_lock:
-                    z = map_pan["zoom"]
-                mpp = 1.3 / max(0.25, z)
-                map_drag(0, 40, mpp)
-                continue
-            if _hit(MAP_BTN_DOWN):
-                map_ever_touched = True
-                with pan_lock:
-                    z = map_pan["zoom"]
-                mpp = 1.3 / max(0.25, z)
-                map_drag(0, -40, mpp)
-                continue
 
             if _hit(MAP_BTN_ZIN):
-                map_ever_touched = True
                 map_zoom(1.5)
                 continue
             if _hit(MAP_BTN_ZOUT):
-                map_ever_touched = True
                 map_zoom(1 / 1.5)
                 continue
-            # Check for recenter button (circular) - use circular hit test
-            if MAP_BTN_RECENTER:
-                rx_rec, ry_rec, rw_rec, rh_rec = MAP_BTN_RECENTER
-                rec_center_x = rx_rec + rw_rec // 2
-                rec_center_y = ry_rec + rh_rec // 2
-                rec_radius = rw_rec // 2
-                dist_sq = (mx - rec_center_x)**2 + (my - rec_center_y)**2
-                if dist_sq <= rec_radius ** 2:
-                    map_ever_touched = True
-                    map_recenter()
-                    continue
-            
-            # Check for north button (rectangular)
-            if MAP_BTN_NORTH and _hit(MAP_BTN_NORTH):
-                # North button just indicates orientation, no action needed
+            if MAP_BTN_RECENTER and _hit(MAP_BTN_RECENTER):
+                map_recenter()
                 continue
 
             if _hit(ROT_CHIP):

@@ -1,0 +1,172 @@
+1<?xml version="1.0" encoding="utf-8"?>
+2<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+3    package="com.motonav"
+4    android:versionCode="2"
+5    android:versionName="2.0" >
+6
+7    <uses-sdk
+8        android:minSdkVersion="21"
+9        android:targetSdkVersion="34" />
+10
+11    <uses-permission android:name="android.permission.INTERNET" />
+11-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:4:5-67
+11-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:4:22-64
+12    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+12-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:5:5-79
+12-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:5:22-76
+13    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+13-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:6:5-76
+13-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:6:22-73
+14    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+14-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:7:5-79
+14-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:7:22-76
+15    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+15-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:8:5-81
+15-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:8:22-78
+16    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+16-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:9:5-77
+16-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:9:22-74
+17    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+17-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:10:5-86
+17-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:10:22-83
+18    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+18-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:11:5-77
+18-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:11:22-74
+19    <uses-permission android:name="android.permission.WAKE_LOCK" />
+19-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:12:5-68
+19-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:12:22-65
+20    <uses-permission
+20-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:14:5-95
+21        android:name="android.permission.BLUETOOTH"
+21-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:14:22-65
+22        android:maxSdkVersion="30" />
+22-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:14:66-92
+23    <uses-permission
+23-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:15:5-101
+24        android:name="android.permission.BLUETOOTH_ADMIN"
+24-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:15:22-71
+25        android:maxSdkVersion="30" />
+25-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:15:72-98
+26    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+26-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:16:5-76
+26-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:16:22-73
+27    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+27-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:17:5-73
+27-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:17:22-70
+28
+29    <permission
+29-->[androidx.core:core:1.9.0] C:\Users\1997s\.gradle\caches\transforms-3\f0f4ee7c3b88100b2d2cd4b05ab423cd\transformed\core-1.9.0\AndroidManifest.xml:22:5-24:47
+30        android:name="com.motonav.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+30-->[androidx.core:core:1.9.0] C:\Users\1997s\.gradle\caches\transforms-3\f0f4ee7c3b88100b2d2cd4b05ab423cd\transformed\core-1.9.0\AndroidManifest.xml:23:9-81
+31        android:protectionLevel="signature" />
+31-->[androidx.core:core:1.9.0] C:\Users\1997s\.gradle\caches\transforms-3\f0f4ee7c3b88100b2d2cd4b05ab423cd\transformed\core-1.9.0\AndroidManifest.xml:24:9-44
+32
+33    <uses-permission android:name="com.motonav.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION" />
+33-->[androidx.core:core:1.9.0] C:\Users\1997s\.gradle\caches\transforms-3\f0f4ee7c3b88100b2d2cd4b05ab423cd\transformed\core-1.9.0\AndroidManifest.xml:26:5-97
+33-->[androidx.core:core:1.9.0] C:\Users\1997s\.gradle\caches\transforms-3\f0f4ee7c3b88100b2d2cd4b05ab423cd\transformed\core-1.9.0\AndroidManifest.xml:26:22-94
+34
+35    <application
+35-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:19:5-54:19
+36        android:allowBackup="false"
+36-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:20:9-36
+37        android:appComponentFactory="androidx.core.app.CoreComponentFactory"
+37-->[androidx.core:core:1.9.0] C:\Users\1997s\.gradle\caches\transforms-3\f0f4ee7c3b88100b2d2cd4b05ab423cd\transformed\core-1.9.0\AndroidManifest.xml:28:18-86
+38        android:debuggable="true"
+39        android:extractNativeLibs="true"
+40        android:icon="@mipmap/ic_launcher"
+40-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:21:9-43
+41        android:label="@string/app_name"
+41-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:23:9-41
+42        android:roundIcon="@mipmap/ic_launcher"
+42-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:22:9-48
+43        android:testOnly="true"
+44        android:theme="@style/AppTheme"
+44-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:24:9-40
+45        android:usesCleartextTraffic="true" >
+45-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:25:9-44
+46        <activity
+46-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:27:9-48:20
+47            android:name="com.motonav.MainActivity"
+47-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:28:13-41
+48            android:exported="true"
+48-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:29:13-36
+49            android:screenOrientation="portrait" >
+49-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:30:13-49
+50            <intent-filter>
+50-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:31:13-34:29
+51                <action android:name="android.intent.action.MAIN" />
+51-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:32:17-69
+51-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:32:25-66
+52
+53                <category android:name="android.intent.category.LAUNCHER" />
+53-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:33:17-77
+53-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:33:27-74
+54            </intent-filter>
+55
+56            <!-- Share a Google Maps link straight into MotoNav -->
+57            <intent-filter>
+57-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:37:13-41:29
+58                <action android:name="android.intent.action.SEND" />
+58-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:38:17-69
+58-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:38:25-66
+59
+60                <category android:name="android.intent.category.DEFAULT" />
+60-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:39:17-76
+60-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:39:27-73
+61
+62                <data android:mimeType="text/plain" />
+62-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:40:17-55
+62-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:40:23-52
+63            </intent-filter>
+64            <intent-filter>
+64-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:42:13-47:29
+65                <action android:name="android.intent.action.VIEW" />
+65-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:43:17-69
+65-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:43:25-66
+66
+67                <category android:name="android.intent.category.DEFAULT" />
+67-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:39:17-76
+67-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:39:27-73
+68                <category android:name="android.intent.category.BROWSABLE" />
+68-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:45:17-78
+68-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:45:27-75
+69
+70                <data android:scheme="geo" />
+70-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:40:17-55
+70-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:46:23-43
+71            </intent-filter>
+72        </activity>
+73
+74        <service
+74-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:49:9-52:56
+75            android:name="com.motonav.NavService"
+75-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:50:13-39
+76            android:exported="false"
+76-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:51:13-37
+77            android:foregroundServiceType="location" />
+77-->C:\Users\1997s\Downloads\motonav-complete (2)\android\app\src\main\AndroidManifest.xml:52:13-53
+78
+79        <provider
+79-->[androidx.emoji2:emoji2:1.2.0] C:\Users\1997s\.gradle\caches\transforms-3\4cbcf27c467347a1a697d011e0391f2d\transformed\emoji2-1.2.0\AndroidManifest.xml:24:9-32:20
+80            android:name="androidx.startup.InitializationProvider"
+80-->[androidx.emoji2:emoji2:1.2.0] C:\Users\1997s\.gradle\caches\transforms-3\4cbcf27c467347a1a697d011e0391f2d\transformed\emoji2-1.2.0\AndroidManifest.xml:25:13-67
+81            android:authorities="com.motonav.androidx-startup"
+81-->[androidx.emoji2:emoji2:1.2.0] C:\Users\1997s\.gradle\caches\transforms-3\4cbcf27c467347a1a697d011e0391f2d\transformed\emoji2-1.2.0\AndroidManifest.xml:26:13-68
+82            android:exported="false" >
+82-->[androidx.emoji2:emoji2:1.2.0] C:\Users\1997s\.gradle\caches\transforms-3\4cbcf27c467347a1a697d011e0391f2d\transformed\emoji2-1.2.0\AndroidManifest.xml:27:13-37
+83            <meta-data
+83-->[androidx.emoji2:emoji2:1.2.0] C:\Users\1997s\.gradle\caches\transforms-3\4cbcf27c467347a1a697d011e0391f2d\transformed\emoji2-1.2.0\AndroidManifest.xml:29:13-31:52
+84                android:name="androidx.emoji2.text.EmojiCompatInitializer"
+84-->[androidx.emoji2:emoji2:1.2.0] C:\Users\1997s\.gradle\caches\transforms-3\4cbcf27c467347a1a697d011e0391f2d\transformed\emoji2-1.2.0\AndroidManifest.xml:30:17-75
+85                android:value="androidx.startup" />
+85-->[androidx.emoji2:emoji2:1.2.0] C:\Users\1997s\.gradle\caches\transforms-3\4cbcf27c467347a1a697d011e0391f2d\transformed\emoji2-1.2.0\AndroidManifest.xml:31:17-49
+86            <meta-data
+86-->[androidx.lifecycle:lifecycle-process:2.4.1] C:\Users\1997s\.gradle\caches\transforms-3\99c153321b5a4708fb21029fa13f7442\transformed\lifecycle-process-2.4.1\AndroidManifest.xml:31:13-33:52
+87                android:name="androidx.lifecycle.ProcessLifecycleInitializer"
+87-->[androidx.lifecycle:lifecycle-process:2.4.1] C:\Users\1997s\.gradle\caches\transforms-3\99c153321b5a4708fb21029fa13f7442\transformed\lifecycle-process-2.4.1\AndroidManifest.xml:32:17-78
+88                android:value="androidx.startup" />
+88-->[androidx.lifecycle:lifecycle-process:2.4.1] C:\Users\1997s\.gradle\caches\transforms-3\99c153321b5a4708fb21029fa13f7442\transformed\lifecycle-process-2.4.1\AndroidManifest.xml:33:17-49
+89        </provider>
+90    </application>
+91
+92</manifest>

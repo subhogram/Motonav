@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="#05070C"
+    android:padding="14dp">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="SELECT REGION"
+        android:textSize="16sp"
+        android:textStyle="bold"
+        android:textColor="#3BA9E0"
+        android:fontFamily="monospace"
+        android:letterSpacing="0.12"
+        android:layout_marginBottom="4dp"/>
+
+    <TextView
+        android:id="@+id/regionPath"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="World"
+        android:textSize="11sp"
+        android:textColor="#5C6B7D"
+        android:fontFamily="monospace"
+        android:layout_marginBottom="10dp"/>
+
+    <ListView
+        android:id="@+id/regionList"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:background="#0F151D"
+        android:divider="#1E2833"
+        android:dividerHeight="1dp"
+        android:cacheColorHint="#00000000"/>
+
+    <TextView
+        android:id="@+id/regionInfo"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Select a region to download."
+        android:textSize="12sp"
+        android:textColor="#D7E6F5"
+        android:fontFamily="monospace"
+        android:background="#0F151D"
+        android:padding="10dp"
+        android:lineSpacingExtra="3dp"
+        android:layout_marginTop="10dp"/>
+
+    <TextView
+        android:id="@+id/regionStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text=""
+        android:textSize="11sp"
+        android:textColor="#4A5768"
+        android:layout_marginTop="6dp"
+        android:layout_marginBottom="8dp"/>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/btnUp"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="46dp"
+            android:text="CLOSE"
+            android:textSize="11sp"
+            android:textColor="#8FA6BC"
+            android:background="@drawable/btn_off"
+            android:layout_marginEnd="6dp"/>
+
+        <Button
+            android:id="@+id/btnDetail"
+            android:layout_width="0dp"
+            android:layout_weight="1.3"
+            android:layout_height="46dp"
+            android:text="MAIN + SECONDARY"
+            android:textSize="9sp"
+            android:textColor="#8FA6BC"
+            android:background="@drawable/btn_off"
+            android:layout_marginEnd="6dp"/>
+
+        <Button
+            android:id="@+id/btnRegionDownload"
+            android:layout_width="0dp"
+            android:layout_weight="1.2"
+            android:layout_height="46dp"
+            android:text="DOWNLOAD"
+            android:textSize="11sp"
+            android:textColor="#0A0C10"
+            android:background="@drawable/btn_on"/>
+    </LinearLayout>
+</LinearLayout>
