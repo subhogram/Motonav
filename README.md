@@ -9,6 +9,10 @@ A self-contained navigator display for Raspberry Pi OS Lite (console). Receives 
 - Touch input, on-screen keyboard, and in-app calibration
 - WiFi discovery and basic network/BT management
 - Demo mode for development without a phone
+- Streamed offline map tiles: the phone sends a rolling buffer of road
+  data (~15 km ahead of the rider, refreshed every ~20 s / 800 m) instead
+  of the whole trip up front, so the Pi's buffer never runs dry and
+  neither side ever has to move the whole map at once
 
 **Requirements**
 - Raspberry Pi running Raspberry Pi OS Lite (console)

@@ -1267,8 +1267,16 @@ def handle_message(msg, source="WIFI"):
                 route_meta["sec"] = float(msg.get("sec", 0) or 0)
             print(f"ROUTE: {len(out)} pts -> {route_meta['dest']} "
                   f"({route_meta['km']:.1f} km)")
-            threading.Thread(target=lambda: report_map_gaps(source),
-                             daemon=True).start()
+            with _gap_lock:
+                _gap_state["t"] = 0.0
+                _gap_state["lat"] = None
+                _gap_state["lon"] = None
+            # only pull in the first stretch of the buffer here — the rest
+            # streams in as the rider advances (see maybe_stream_buffer)
+            threading.Thread(
+                target=lambda: report_map_gaps(source, ahead_km=BUFFER_AHEAD_KM,
+                                               behind_km=BUFFER_BEHIND_KM),
+                daemon=True).start()
         except Exception as e:
             print(f"route parse: {e}")
         return
@@ -1300,7 +1308,10 @@ def handle_message(msg, source="WIFI"):
         return
 
     if mtype == "gaps_req":
-        threading.Thread(target=lambda: report_map_gaps(source), daemon=True).start()
+        threading.Thread(
+            target=lambda: report_map_gaps(source, ahead_km=BUFFER_AHEAD_KM,
+                                           behind_km=BUFFER_BEHIND_KM),
+            daemon=True).start()
         return
 
     if mtype == "metrics_req":
@@ -1380,6 +1391,10 @@ def handle_message(msg, source="WIFI"):
                     globals()["last_nav_ms"] = time.time()
                 except Exception as e:
                     print(f"step guidance: {e}")
+            try:
+                maybe_stream_buffer(lat, lon, source)
+            except Exception as e:
+                print(f"stream buffer: {e}")
     else:
         global last_nav_ms
         last_nav_ms = time.time()
@@ -1893,11 +1908,70 @@ def _dir_size(path):
 
 
 
-def report_map_gaps(transport="WIFI"):
+# ── streaming buffer ─────────────────────────────────────────────────────
+# Rather than pull every tile the whole trip needs the moment a route is
+# set, we only ever ask the phone for a stretch around the rider: a bit
+# behind (in case of a U-turn) and a good distance ahead. As the rider
+# advances, the window slides forward and pulls in fresh ground — the
+# buffer stays topped up but the Pi (and the phone's radio) is never asked
+# to move the whole map in one go.
+BUFFER_AHEAD_KM = 15.0     # how far up the road tiles are kept ready
+BUFFER_BEHIND_KM = 1.5     # small margin behind the rider
+GAP_CHECK_MIN_S = 20.0     # don't re-check coverage more often than this
+GAP_CHECK_MOVE_M = 800.0   # ...unless the rider has moved at least this far
+
+_gap_state = {"t": 0.0, "lat": None, "lon": None}
+_gap_lock = threading.Lock()
+
+
+def _nearest_index(pts, lat, lon):
+    best_i, best_d2 = 0, None
+    for i, (la, lo) in enumerate(pts):
+        dlat = (la - lat) * tilestore.M_PER_DEG
+        dlon = (lo - lon) * tilestore.M_PER_DEG * math.cos(math.radians(lat))
+        d2 = dlat * dlat + dlon * dlon
+        if best_d2 is None or d2 < best_d2:
+            best_d2, best_i = d2, i
+    return best_i
+
+
+def _route_window(pts, lat, lon, ahead_km, behind_km):
     """
-    Work out which tiles the current route crosses that we have no data for,
-    and ask the phone to fetch just those. This is what keeps downloads small:
-    we never re-request ground we already hold.
+    Slice the route to the stretch around the rider — behind_km back,
+    ahead_km ahead, measured along the route from the closest point —
+    so gap checks only ever cover the buffer, not the whole trip.
+    """
+    if len(pts) < 2 or lat is None or lon is None:
+        return None
+    i0 = _nearest_index(pts, lat, lon)
+
+    def walk(step, budget_m):
+        out = [pts[i0]]
+        dist, i = 0.0, i0
+        while 0 <= i + step < len(pts) and dist < budget_m:
+            nxt = pts[i + step]
+            dist += math.hypot(
+                (nxt[0] - pts[i][0]) * tilestore.M_PER_DEG,
+                (nxt[1] - pts[i][1]) * tilestore.M_PER_DEG * math.cos(math.radians(nxt[0])))
+            out.append(nxt)
+            i += step
+        return out
+
+    back = walk(-1, behind_km * 1000.0)
+    fwd = walk(1, ahead_km * 1000.0)
+    return list(reversed(back))[:-1] + fwd
+
+
+def report_map_gaps(transport="WIFI", ahead_km=None, behind_km=BUFFER_BEHIND_KM):
+    """
+    Work out which tiles are missing and ask the phone to fetch just those.
+    This is what keeps downloads small: we never re-request ground we
+    already hold.
+
+    With ahead_km set and a live GPS fix, only the buffer window around the
+    rider's current position is checked, so a long trip fills progressively
+    as it's driven instead of all at once. Without a fix yet, the whole
+    route is checked, same as before.
     """
     if tiles is None or tilestore is None:
         return
@@ -1906,10 +1980,18 @@ def report_map_gaps(transport="WIFI"):
     if len(pts) < 2:
         return
 
-    keys = tilestore.keys_along(pts, radius_m=1500)
+    window = None
+    if ahead_km:
+        with nav_lock:
+            lat, lon = nav.get("lat"), nav.get("lon")
+        window = _route_window(pts, lat, lon, ahead_km, behind_km)
+    use_pts = window if window else pts
+    label = "buffer" if window else "route"
+
+    keys = tilestore.keys_along(use_pts, radius_m=1500)
     missing = tiles.missing(keys)
     if not missing:
-        print(f"Maps: route fully covered ({len(keys)} tiles)")
+        print(f"Maps: {label} fully covered ({len(keys)} tiles)")
         reply(transport, {"type": "map_gaps", "boxes": [], "have": len(keys)})
         return
 
@@ -1935,12 +2017,48 @@ def report_map_gaps(transport="WIFI"):
         boxes.append({"s": round(s, 4), "w": round(w, 4),
                       "n": round(n, 4), "e": round(e, 4)})
 
-    print(f"Maps: {len(missing)}/{len(keys)} tiles missing -> "
+    print(f"Maps: {len(missing)}/{len(keys)} {label} tiles missing -> "
           f"{len(boxes)} fill request(s)")
     with nav_lock:
         nav["region_msg"] = f"fetching {len(missing)} tiles"
     reply(transport, {"type": "map_gaps", "boxes": boxes,
                       "missing": len(missing), "have": len(keys) - len(missing)})
+
+
+def maybe_stream_buffer(lat, lon, transport="WIFI"):
+    """
+    Called on every GPS fix while a route is active. Keeps the tile buffer
+    ahead of the rider topped up by re-checking coverage every so often (or
+    sooner if the rider has moved far enough that the last check is stale)
+    and asking the phone to stream in whatever the buffer window is still
+    missing. This is the "as and when needed" half of map delivery — small,
+    frequent, forward-looking requests instead of one big download at the
+    start of a trip.
+    """
+    if tiles is None or tilestore is None or lat is None or lon is None:
+        return
+    with route_lock:
+        has_route = len(route_pts) >= 2
+    if not has_route:
+        return
+
+    now = time.time()
+    with _gap_lock:
+        last_t = _gap_state["t"]
+        last_lat, last_lon = _gap_state["lat"], _gap_state["lon"]
+        stale = (now - last_t) >= GAP_CHECK_MIN_S
+        moved = last_lat is None or moved_enough(
+            (last_lat, last_lon), (lat, lon), GAP_CHECK_MOVE_M)
+        if not (stale and moved):
+            return
+        _gap_state["t"] = now
+        _gap_state["lat"] = lat
+        _gap_state["lon"] = lon
+
+    threading.Thread(
+        target=lambda: report_map_gaps(transport, ahead_km=BUFFER_AHEAD_KM,
+                                       behind_km=BUFFER_BEHIND_KM),
+        daemon=True).start()
 
 
 def send_metrics(transport="WIFI"):

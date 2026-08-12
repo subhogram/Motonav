@@ -31,6 +31,12 @@ public class Router {
 
     public static final int CORRIDOR_M = 3000;      // 3 km around the route
 
+    // How far up the route we prep tiles for when navigation starts. Long
+    // trips are streamed the rest of the way — see GapFiller / PiMetrics,
+    // which top the buffer up as the Pi reports the rider approaching its
+    // edge — instead of pulling the whole route down before setting off.
+    public static final double BUFFER_AHEAD_KM = 15.0;
+
     public static class Step {
         public double lat, lon;
         public String maneuver, text, road;
@@ -97,14 +103,18 @@ public class Router {
                 report(cb, true, String.format("Route: %.1f km, %d min",
                         totalKm, (int) Math.round(totalSec / 60)));
 
-                // ── send the Pi exactly the tiles this route needs, taken
-                //    from the map library already on the phone. No signal needed.
+                // ── send the Pi exactly the tiles the ride needs right now,
+                //    taken from the map library already on the phone. Only
+                //    the initial buffer window is prepped here — a long
+                //    route streams in the rest as it's driven, instead of
+                //    the whole trip landing on the Pi before setting off.
                 Progress.set(Progress.Phase.SLICING, "checking offline library");
-                java.util.List<String> needed = TileCache.keysAlong(pts, CORRIDOR_M);
+                java.util.List<double[]> bufferPts = windowFromStart(pts, BUFFER_AHEAD_KM);
+                java.util.List<String> needed = TileCache.keysAlong(bufferPts, CORRIDOR_M);
                 java.util.List<String> have = TileCache.haveOf(ctx, needed);
                 java.util.List<String> lack = TileCache.missingOf(ctx, needed);
                 report(cb, true, "Offline map: " + have.size() + "/" + needed.size()
-                                 + " tiles on the phone");
+                                 + " buffer tiles on the phone");
 
                 if (!have.isEmpty()) {
                     Progress.set(Progress.Phase.SENDING, have.size() + " tiles \u2192 Pi");
@@ -116,14 +126,16 @@ public class Router {
                     });
                 }
 
-                // fetch only what the phone genuinely lacks
+                // fetch only what the phone genuinely lacks, and only for
+                // the buffer — the rest streams in via map_gaps as the Pi
+                // sees the rider approach the edge of what it already has
                 if (!lack.isEmpty()) {
                     Progress.set(Progress.Phase.DOWNLOADING,
                         lack.size() + " tiles missing");
                     RegionDownloader.Detail det = (totalKm > 120)
                         ? RegionDownloader.Detail.NORMAL
                         : RegionDownloader.Detail.FULL;
-                    RegionDownloader.runCorridor(ctx, pts, CORRIDOR_M, det,
+                    RegionDownloader.runCorridor(ctx, bufferPts, CORRIDOR_M, det,
                         new RegionDownloader.Progress() {
                             @Override public void onStatus(String m) {
                                 Progress.within(Progress.Phase.DOWNLOADING, 0.5, m);
@@ -173,6 +185,21 @@ public class Router {
                 } finally { busy = false; }
             }, "reroute").start();
         }
+    }
+
+    /** First aheadKm of a route, measured along the polyline from its start. */
+    static List<double[]> windowFromStart(List<double[]> pts, double aheadKm) {
+        List<double[]> out = new ArrayList<>();
+        if (pts.isEmpty()) return out;
+        out.add(pts.get(0));
+        double budget = aheadKm * 1000.0, dist = 0;
+        for (int i = 1; i < pts.size() && dist < budget; i++) {
+            double[] a = pts.get(i - 1), b = pts.get(i);
+            dist += Math.hypot((b[0] - a[0]) * 111320.0,
+                (b[1] - a[1]) * 111320.0 * Math.cos(Math.toRadians(b[0])));
+            out.add(b);
+        }
+        return out;
     }
 
     // ── OSRM ─────────────────────────────────────────────────────────────
