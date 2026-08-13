@@ -1603,45 +1603,193 @@ def local_ips():
 # ══════════════════════════════════════════════════════════════════════════════
 #  DEMO FEEDER
 # ══════════════════════════════════════════════════════════════════════════════
+# A closed loop that actually turns where the announced instructions say it
+# will, with a small fabricated street grid behind it, so --demo shows real
+# turn-by-turn navigation instead of an arrow drifting over a blank grid.
+DEMO_LEGS = [
+    # (instruction, road, leg_len_m, distance_raw, maneuver)
+    ("Continue straight", "Outer Ring Road", 1200, "1.2 km", "straight"),
+    ("Turn left onto MG Road", "MG Road", 350, "350 m", "turn-left"),
+    ("Turn right onto Brigade Road", "Brigade Road", 80, "80 m", "turn-right"),
+    ("Keep slight right", "Hosur Road", 600, "600 m", "slight-right"),
+    ("Take the roundabout", "Residency Road", 500, "500 m", "roundabout"),
+    ("Make a U-turn", "Lavelle Road", 120, "120 m", "u-turn-left"),
+    ("You have arrived", "Destination", 0, "0 m", "destination"),
+]
+
+DEMO_TURN_DEG = {
+    "straight": 0, "turn-left": -75, "turn-right": 75,
+    "slight-left": -25, "slight-right": 25,
+    "roundabout": 80, "u-turn-left": 175, "destination": 0,
+}
+
+DEMO_SPEED_MPS = 11.0        # ~40 km/h, a plausible urban pace
+DEMO_TICK_S = 0.2
+DEMO_ARRIVE_PAUSE_S = 3.0
+
+
+def _demo_walk(lat, lon, heading_deg, dist_m):
+    """Project forward dist_m along heading_deg (planar approx, fine locally)."""
+    lat2 = lat + (dist_m * math.cos(math.radians(heading_deg))) / tilestore.M_PER_DEG
+    lon2 = lon + (dist_m * math.sin(math.radians(heading_deg))) / (
+        tilestore.M_PER_DEG * math.cos(math.radians(lat)))
+    return lat2, lon2
+
+
+def _build_demo_route(start_lat, start_lon, start_heading):
+    """
+    Walk DEMO_LEGS leg by leg into a real polyline that turns exactly where
+    each instruction says it will. Returns (pts, legs, total_m):
+      pts     -- the full loop polyline, for route_pts
+      legs    -- per-leg metadata, cum0 = cumulative distance at leg start
+      total_m -- total loop length
+    """
+    lat, lon, heading = start_lat, start_lon, start_heading
+    pts = [(lat, lon)]
+    legs = []
+    cum = 0.0
+    for ins, road, length_m, dr, man in DEMO_LEGS:
+        turn = DEMO_TURN_DEG.get(man, 0)
+        if length_m > 0:
+            if man == "roundabout" and turn:
+                n = 6                      # bend gradually so it reads as a curve
+                for _ in range(n):
+                    lat, lon = _demo_walk(lat, lon, heading, length_m / n)
+                    heading = (heading + turn / n) % 360
+                    pts.append((lat, lon))
+            else:
+                lat, lon = _demo_walk(lat, lon, heading, length_m)
+                pts.append((lat, lon))
+                heading = (heading + turn) % 360
+        else:
+            heading = (heading + turn) % 360
+        legs.append({"cum0": cum, "len": length_m, "ins": ins,
+                     "road": road, "dr": dr, "man": man})
+        cum += length_m
+    return pts, legs, cum
+
+
+def _demo_chunk_ways(cls, line_pts, max_seg_m=250):
+    """
+    Break a polyline into short (<=max_seg_m) 2-point ways so each segment's
+    tile bucket matches where it's actually drawn (tilestore.store_ways
+    indexes a way by its first point's tile only).
+    """
+    out = []
+    for a, b in zip(line_pts, line_pts[1:]):
+        length = _seg_len(a, b)
+        n = max(1, math.ceil(length / max_seg_m))
+        for i in range(n):
+            f0, f1 = i / n, (i + 1) / n
+            p0 = (a[0] + (b[0] - a[0]) * f0, a[1] + (b[1] - a[1]) * f0)
+            p1 = (a[0] + (b[0] - a[0]) * f1, a[1] + (b[1] - a[1]) * f1)
+            out.append((cls, [p0, p1]))
+    return out
+
+
+def _build_demo_grid(pts, spacing_m=140, pad_m=250):
+    """
+    Fabricate a small Manhattan-style street grid around the route's
+    bounding box -- purely visual texture, never real map data. The route
+    itself becomes a class-3 "primary" road; cross-streets are class-6
+    "residential".
+    """
+    lats = [p[0] for p in pts]
+    lons = [p[1] for p in pts]
+    lat0 = sum(lats) / len(lats)
+    pad_lat = pad_m / tilestore.M_PER_DEG
+    pad_lon = pad_m / (tilestore.M_PER_DEG * math.cos(math.radians(lat0)))
+    south, north = min(lats) - pad_lat, max(lats) + pad_lat
+    west, east = min(lons) - pad_lon, max(lons) + pad_lon
+
+    ways = _demo_chunk_ways(3, pts)        # the route itself, as the main road
+
+    dlat_step = spacing_m / tilestore.M_PER_DEG
+    dlon_step = spacing_m / (tilestore.M_PER_DEG * math.cos(math.radians(lat0)))
+    for i in range(math.ceil((north - south) / dlat_step) + 1):
+        la = south + i * dlat_step
+        ways.extend(_demo_chunk_ways(6, [(la, west), (la, east)]))
+    for j in range(math.ceil((east - west) / dlon_step) + 1):
+        lo = west + j * dlon_step
+        ways.extend(_demo_chunk_ways(6, [(south, lo), (north, lo)]))
+    return ways
+
+
+def _demo_pos_at(pts, dist_m):
+    """Interpolate (lat, lon, bearing) at arclength dist_m along pts."""
+    acc = 0.0
+    for i in range(len(pts) - 1):
+        a, b = pts[i], pts[i + 1]
+        seg = _seg_len(a, b)
+        if dist_m <= acc + seg or i == len(pts) - 2:
+            frac = 0.0 if seg <= 0 else min(1.0, max(0.0, (dist_m - acc) / seg))
+            lat = a[0] + (b[0] - a[0]) * frac
+            lon = a[1] + (b[1] - a[1]) * frac
+            bearing = math.degrees(math.atan2(
+                (b[1] - a[1]) * math.cos(math.radians((a[0] + b[0]) / 2)),
+                (b[0] - a[0]))) % 360
+            return lat, lon, bearing
+        acc += seg
+    return pts[-1][0], pts[-1][1], 0.0
+
+
+def _demo_leg_at(legs, cursor):
+    for leg in legs:
+        if cursor < leg["cum0"] + leg["len"] or leg is legs[-1]:
+            return leg
+    return legs[-1]
+
+
 def demo_feeder():
-    scenarios = [
-        ("Continue straight", "Outer Ring Road", 1200, "1.2 km", "straight", 1740),
-        ("Turn left onto MG Road", "MG Road", 350, "350 m", "turn-left", 720),
-        ("Turn right onto Brigade Road", "Brigade Road", 80, "80 m", "turn-right", 300),
-        ("Keep slight right", "Hosur Road", 600, "600 m", "slight-right", 480),
-        ("Take the roundabout", "Residency Road", 500, "500 m", "roundabout", 180),
-        ("Make a U-turn", "Lavelle Road", 120, "120 m", "u-turn-left", 90),
-        ("You have arrived", "Destination", 0, "0 m", "destination", 0),
-    ]
-    lat, lon, hdg, i, t = 12.9716, 77.5946, 45.0, 0, 0
+    pts, legs, total_m = _build_demo_route(12.9716, 77.5946, 45.0)
+
+    with route_lock:
+        route_pts.clear()
+        route_pts.extend(pts)
+        route_meta["dest"] = "Demo Loop"
+        route_meta["km"] = total_m / 1000.0
+        route_meta["sec"] = total_m / DEMO_SPEED_MPS
+
+    if tiles is not None and tilestore is not None:
+        try:
+            tiles.store_ways(_build_demo_grid(pts))
+        except Exception as e:
+            print(f"demo tiles: {e}")
+
+    cursor = 0.0
     time.sleep(0.5)
     while True:
-        t += 1
-        if t % 12 == 1:
-            ins, road, dm, dr, man, dur = scenarios[i % len(scenarios)]
-            with nav_lock:
-                nav.update({
-                    "instruction": ins, "road": road, "distance_m": dm,
-                    "distance_raw": dr, "maneuver": man, "duration_s": dur,
-                    "eta_seconds": dur, "arrived": man == "destination",
-                    "connected": True,
-                })
-            print(f"DEMO: {ins}")
-            i += 1
-        hdg = (hdg + math.sin(t * 0.05) * 4) % 360
-        step = 8.0
-        lat += (step * math.cos(math.radians(hdg))) / 111320.0
-        lon += (step * math.sin(math.radians(hdg))) / (111320.0 * math.cos(math.radians(lat)))
+        leg = _demo_leg_at(legs, cursor)
+        arrived = leg is legs[-1]
+        remaining = 0.0 if arrived else max(0.0, leg["cum0"] + leg["len"] - cursor)
+        left_s = max(0.0, (total_m - cursor) / DEMO_SPEED_MPS)
+        lat, lon, bearing = _demo_pos_at(pts, cursor)
+
         with nav_lock:
-            nav["lat"], nav["lon"] = lat, lon
-            nav["bearing"], nav["speed_kph"] = hdg, 34
-            nav["connected"] = True
+            nav.update({
+                "instruction": leg["ins"], "road": leg["road"],
+                "distance_m": remaining, "distance_raw": leg["dr"],
+                "maneuver": leg["man"], "duration_s": left_s,
+                "eta_seconds": left_s, "arrived": arrived,
+                "lat": lat, "lon": lon, "bearing": bearing,
+                "speed_kph": 0 if arrived else round(DEMO_SPEED_MPS * 3.6),
+                "connected": True,
+            })
         with trail_lock:
             if not trail or moved_enough(trail[-1], (lat, lon)):
                 trail.append((lat, lon))
                 if len(trail) > TRAIL_MAX:
                     del trail[0:len(trail) - TRAIL_MAX]
-        time.sleep(0.3)
+
+        if arrived:
+            time.sleep(DEMO_ARRIVE_PAUSE_S)
+            cursor = 0.0
+            with trail_lock:
+                trail.clear()
+            continue
+
+        cursor = min(total_m, cursor + DEMO_SPEED_MPS * DEMO_TICK_S)
+        time.sleep(DEMO_TICK_S)
 
 
 
@@ -1796,7 +1944,12 @@ except Exception as _e:
     print(f"tilestore unavailable: {_e}")
     tilestore = None
 
-MAP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "maps")
+if DEMO:
+    # never let the demo's fabricated streets touch a real rider's cache
+    import tempfile
+    MAP_DIR = tempfile.mkdtemp(prefix="motonav_demo_")
+else:
+    MAP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "maps")
 tiles = tilestore.TileStore(MAP_DIR) if tilestore else None
 
 REGION_FILE = "region.mnosm"
