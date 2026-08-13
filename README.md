@@ -9,6 +9,10 @@ A self-contained navigator display for Raspberry Pi OS Lite (console). Receives 
 - Touch input, on-screen keyboard, and in-app calibration
 - WiFi discovery and basic network/BT management
 - Demo mode for development without a phone
+- Streamed offline map tiles: the phone sends a rolling buffer of road
+  data (~15 km ahead of the rider, refreshed every ~20 s / 800 m) instead
+  of the whole trip up front, so the Pi's buffer never runs dry and
+  neither side ever has to move the whole map at once
 
 **Requirements**
 - Raspberry Pi running Raspberry Pi OS Lite (console)
@@ -51,7 +55,12 @@ Troubleshooting
 - For touch calibration, use `--calibrate` and follow on-screen prompts; the app stores calibration in touch_cal.conf.
 
 Development
-- Use `--demo` to exercise rendering without a phone connection.
+- Use `--demo` to exercise rendering without a phone connection. It drives a
+  real, turning polyline through a small fabricated street grid on a
+  continuous loop — turn markers, ETA, and the past trail all track an
+  actual road instead of a wandering arrow on a blank grid — so it also
+  doubles as a quick way to show off navigation without a rider, a phone,
+  or a network connection.
 
 License
 - MIT-style, see project for details.

@@ -10,9 +10,14 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * The Pi tells us which stretches of the route it has no map for; we fetch
- * exactly those boxes and append them. Nothing already on the Pi is
+ * The Pi tells us which stretches of its tile buffer it has no map for; we
+ * fetch exactly those boxes and append them. Nothing already on the Pi is
  * re-downloaded, so a big pbf import means almost nothing to fetch.
+ *
+ * During a ride this fires repeatedly, not just once: the Pi re-checks the
+ * road ahead of the rider every so often and only ever asks for the buffer
+ * window, so the map streams in a little at a time as the trip progresses
+ * instead of the whole route landing on the Pi at the start.
  */
 public class GapFiller {
 
