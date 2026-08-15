@@ -15,6 +15,7 @@ RUN:
     sudo python3 motonav.py --demo     # simulated driving, no phone needed
     sudo python3 motonav.py --calibrate  # touch calibration straight away
     sudo python3 motonav.py --fb /dev/fb1   # force a specific framebuffer
+    sudo python3 motonav.py --keep-console  # leave the VT in text mode (debug)
 
 Tap the mode chip (top-right) to cycle AUTO / DAY / NIGHT themes.
 Press ESC or Ctrl+C to quit.
@@ -22,7 +23,9 @@ Press ESC or Ctrl+C to quit.
 
 import os
 import sys
+import atexit
 import bisect
+import signal
 import json
 import math
 import time
@@ -131,6 +134,7 @@ class FBWriter:
 
     FBIOGET_VSCREENINFO = 0x4600
     FBIOGET_FSCREENINFO = 0x4602
+    FORCE_PUSH_S = 2.0     # repaint at least this often, even if unchanged
 
     def __init__(self, dev):
         self.dev = dev
@@ -147,6 +151,7 @@ class FBWriter:
         self._canvas = None        # letterbox target, reused every frame
         self._scaled = None        # scale() destination, reused every frame
         self._last = None          # last bytes pushed, for identical-frame skip
+        self._last_push = 0.0      # when, so a static screen still gets refreshed
         self._bgra = None          # does this pygame's tostring do BGRA?
         print(f"Framebuffer {dev}: {self.w}x{self.h} {self.bpp}bpp stride={self.stride}")
         if _np is None:
@@ -182,9 +187,16 @@ class FBWriter:
                                              (self.h - nh) // 2))
             surface = self._canvas
         data = self._to565(surface) if self.bpp == 16 else self._to32(surface)
-        if data == self._last:
+        # Skipping an identical frame saves the SPI panel a full re-scan, but
+        # it also means nothing overwrites whatever else may have drawn into
+        # the framebuffer behind our back (a stray console cursor, a kernel
+        # message). Push unconditionally every so often so the screen repairs
+        # itself even while the UI is standing still.
+        now = time.monotonic()
+        if data == self._last and (now - self._last_push) < self.FORCE_PUSH_S:
             return False
         self._last = data
+        self._last_push = now
         self.mm.seek(0)
         self.mm.write(data)
         return True
@@ -242,6 +254,95 @@ class FBWriter:
             os.close(self.fd)
         except Exception:
             pass
+
+
+# ── Linux console ─────────────────────────────────────────────────────────────
+KDSETMODE = 0x4B3A
+KD_TEXT = 0x00
+KD_GRAPHICS = 0x01
+KEEP_CONSOLE = "--keep-console" in ARGS
+
+
+class ConsoleGuard:
+    """
+    Stop the kernel's framebuffer console drawing on top of us.
+
+    We write pixels straight into /dev/fb*, but fbcon is attached to that
+    same memory and carries on painting its blinking block cursor — and any
+    kernel message — wherever the console text happened to leave off. On the
+    panel that shows up as a flashing black square sitting in the middle of
+    the map.
+
+    Three steps, weakest first, each independently useful because different
+    Pi images disagree about which ones exist:
+      1. turn off cursor blinking via sysfs,
+      2. send the hide-cursor / no-blanking escapes to the console device
+         (the console, not stdout — under systemd stdout is the journal,
+         which is why `setterm` in a unit file does nothing),
+      3. put the VT in KD_GRAPHICS, which makes fbcon stop drawing at all.
+
+    Everything is restored on the way out, including on SIGTERM, so stopping
+    the service leaves a usable console behind.
+    """
+
+    DEVICES = ("/dev/tty0", "/dev/console", "/dev/tty1")
+
+    def __init__(self):
+        self.fd = None
+        self.graphics = False
+
+    def take(self):
+        try:
+            with open("/sys/class/graphics/fbcon/cursor_blink", "w") as f:
+                f.write("0")
+        except Exception:
+            pass
+
+        for dev in self.DEVICES:
+            try:
+                self.fd = os.open(dev, os.O_RDWR | os.O_NOCTTY)
+                break
+            except Exception:
+                self.fd = None
+        if self.fd is None:
+            print("Console: no VT to quiet (run as root to hide the text cursor)")
+            return
+
+        try:
+            # hide cursor, stop the console blanking itself mid-ride
+            os.write(self.fd, b"\033[?25l\033[?17;0;0c\033[9;0]")
+        except Exception:
+            pass
+
+        if KEEP_CONSOLE:
+            print("Console: cursor hidden (--keep-console: leaving VT in text mode)")
+            return
+        try:
+            fcntl.ioctl(self.fd, KDSETMODE, KD_GRAPHICS)
+            self.graphics = True
+            print("Console: VT switched to graphics mode — fbcon will stay off us")
+        except Exception as e:
+            print(f"Console: could not take graphics mode ({e}); "
+                  "cursor is hidden but fbcon may still draw")
+
+    def release(self):
+        if self.fd is None:
+            return
+        try:
+            if self.graphics:
+                fcntl.ioctl(self.fd, KDSETMODE, KD_TEXT)
+            os.write(self.fd, b"\033[?25h")       # cursor back
+        except Exception:
+            pass
+        try:
+            os.close(self.fd)
+        except Exception:
+            pass
+        self.fd = None
+        self.graphics = False
+
+
+console = ConsoleGuard()
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -3841,6 +3942,7 @@ def main():
     pygame.font.init()
     load_rotation()
     load_region()
+    console.take()
     screen, fb = init_screen()
     fonts = make_fonts()
 
@@ -4144,12 +4246,27 @@ def main():
     print("MotoNav stopped.")
 
 
+def _shutdown(*_a):
+    """Hand the console back, whatever we are stopped by."""
+    console.release()
+    try:
+        pygame.quit()
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
+    # systemd stops us with SIGTERM; without this the VT would be left in
+    # graphics mode and the console would look dead until the next reboot
+    atexit.register(console.release)
+    for _sig in ("SIGTERM", "SIGHUP"):
+        try:
+            signal.signal(getattr(signal, _sig), lambda *_a: sys.exit(0))
+        except Exception:
+            pass
     try:
         main()
     except KeyboardInterrupt:
         print("\nInterrupted.")
-        try:
-            pygame.quit()
-        except Exception:
-            pass
+    finally:
+        _shutdown()

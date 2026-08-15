@@ -42,7 +42,15 @@ sudo python3 motonav.py --list    # list detected framebuffers, then exit
 sudo python3 motonav.py --demo    # simulated driving without a phone
 sudo python3 motonav.py --calibrate # start touch calibration immediately
 sudo python3 motonav.py --fb /dev/fb1 # force specific framebuffer device
+sudo python3 motonav.py --keep-console # leave the console in text mode (debug)
 ```
+
+The app takes the Linux virtual terminal into graphics mode while it runs, so
+the kernel's framebuffer console stops painting its blinking cursor into the
+same memory we draw pixels into — without that, a flashing black block shows
+up somewhere on the map. It is handed back on exit, including on SIGTERM, so
+stopping the service leaves a usable console. Run with `--keep-console` if you
+need console text visible while debugging.
 
 Environment variables (optional):
 - `TCP_PORT` — port to receive nav messages (default 9999)
@@ -72,7 +80,9 @@ link and tile streaming, so the display is built around not wasting it:
 - **Redraw rate follows what is happening**: ~15 fps while a finger is on
   the glass, ~10 fps while riding, ~3 fps parked, and it is clamped further
   if frames turn out to be expensive so drawing can never eat the whole
-  core. Frames identical to the last one are not pushed to the panel at all.
+  core. A frame identical to the last one is not pushed to the panel, though
+  the screen is repainted at least every 2 s regardless, so anything that
+  draws into the framebuffer behind the app's back gets scrubbed away.
 - **The buffer is 8 km ahead / 1.5 km behind** (`BUFFER_AHEAD_KM` in
   motonav.py, mirrored by `Router.BUFFER_AHEAD_KM` in the Android app —
   change both together).
@@ -83,6 +93,11 @@ Troubleshooting
   that `maps/` is not full of tiles imported before simplification existed —
   `clear_map` from the phone and letting the buffer re-stream will shrink them.
 - For touch calibration, use `--calibrate` and follow on-screen prompts; the app stores calibration in touch_cal.conf.
+- A blinking black block sitting on the map is the kernel console's text
+  cursor drawing into the framebuffer underneath the app. It should not
+  happen any more, but if it does, the app was almost certainly not run as
+  root (it needs to open `/dev/tty0` to quiet the console) — check the
+  startup log for a `Console:` line saying so.
 
 Development
 - Use `--demo` to exercise rendering without a phone connection. It drives a
