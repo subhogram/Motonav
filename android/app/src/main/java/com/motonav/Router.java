@@ -35,7 +35,10 @@ public class Router {
     // trips are streamed the rest of the way — see GapFiller / PiMetrics,
     // which top the buffer up as the Pi reports the rider approaching its
     // edge — instead of pulling the whole route down before setting off.
-    public static final double BUFFER_AHEAD_KM = 15.0;
+    // Keep this in step with BUFFER_AHEAD_KM in motonav.py: prepping further
+    // ahead than the Pi's gap checks ever ask about just spends the phone's
+    // radio and the Pi's storage on ground it will re-request later anyway.
+    public static final double BUFFER_AHEAD_KM = 8.0;
 
     public static class Step {
         public double lat, lon;

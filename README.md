@@ -10,9 +10,13 @@ A self-contained navigator display for Raspberry Pi OS Lite (console). Receives 
 - WiFi discovery and basic network/BT management
 - Demo mode for development without a phone
 - Streamed offline map tiles: the phone sends a rolling buffer of road
-  data (~15 km ahead of the rider, refreshed every ~20 s / 800 m) instead
+  data (~8 km ahead of the rider, refreshed every ~20 s / 800 m) instead
   of the whole trip up front, so the Pi's buffer never runs dry and
   neither side ever has to move the whole map at once
+- Tuned for the Pi Zero W: road geometry is simplified when it is stored,
+  tiles decode on a background thread, route position is tracked
+  incrementally rather than rescanned, and the redraw rate follows what is
+  actually happening on screen (see "Performance" below)
 
 **Requirements**
 - Raspberry Pi running Raspberry Pi OS Lite (console)
@@ -50,8 +54,34 @@ Files of interest
 - region.mnosm — optional offline OSM region file (saved by the app)
 - icons/ — directory for UI icon assets
 
+Performance (Raspberry Pi Zero W)
+
+The Zero W has one 1 GHz ARMv6 core to share between drawing, the phone
+link and tile streaming, so the display is built around not wasting it:
+
+- **Install numpy** (`sudo apt install python3-numpy`). It is optional, but
+  without it every frame is converted to the panel's pixel format the slow
+  way. The app prints a warning at startup if it is missing.
+- **Tile geometry is simplified when stored** (2 m tolerance), so the draw
+  loop projects far fewer points than OSM ships.
+- **Tiles decode on a background thread.** A tile that is not resident yet
+  is skipped for a frame or two rather than stalling the UI on disk I/O.
+- **Position along the route is tracked incrementally**, and distances come
+  from a cumulative table built once per route, so nothing walks the whole
+  trip per GPS fix or per frame.
+- **Redraw rate follows what is happening**: ~15 fps while a finger is on
+  the glass, ~10 fps while riding, ~3 fps parked, and it is clamped further
+  if frames turn out to be expensive so drawing can never eat the whole
+  core. Frames identical to the last one are not pushed to the panel at all.
+- **The buffer is 8 km ahead / 1.5 km behind** (`BUFFER_AHEAD_KM` in
+  motonav.py, mirrored by `Router.BUFFER_AHEAD_KM` in the Android app —
+  change both together).
+
 Troubleshooting
 - If SDL does not detect the framebuffer, try `--fb /dev/fb1` or run `--list` to inspect devices.
+- If touch feels laggy or the UI stutters, check that numpy is installed and
+  that `maps/` is not full of tiles imported before simplification existed —
+  `clear_map` from the phone and letting the buffer re-stream will shrink them.
 - For touch calibration, use `--calibrate` and follow on-screen prompts; the app stores calibration in touch_cal.conf.
 
 Development
