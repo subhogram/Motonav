@@ -15,6 +15,7 @@ RUN:
     sudo python3 motonav.py --demo     # simulated driving, no phone needed
     sudo python3 motonav.py --calibrate  # touch calibration straight away
     sudo python3 motonav.py --fb /dev/fb1   # force a specific framebuffer
+    sudo python3 motonav.py --keep-console  # leave the VT in text mode (debug)
 
 Tap the mode chip (top-right) to cycle AUTO / DAY / NIGHT themes.
 Press ESC or Ctrl+C to quit.
@@ -22,6 +23,9 @@ Press ESC or Ctrl+C to quit.
 
 import os
 import sys
+import atexit
+import bisect
+import signal
 import json
 import math
 import time
@@ -108,15 +112,29 @@ except ImportError:
     _np = None
 
 
+# RGB888 -> RGB565 channel tables, used by the no-numpy fallback below.
+_T_R_F8 = bytes(i & 0xF8 for i in range(256))          # hi byte: RRRRR---
+_T_G_HI = bytes(i >> 5 for i in range(256))            # hi byte: -----GGG
+_T_G_LO = bytes((i & 0x1C) << 3 for i in range(256))   # lo byte: GGG-----
+_T_B_LO = bytes(i >> 3 for i in range(256))            # lo byte: ---BBBBB
+
+
 class FBWriter:
     """
     Writes pygame Surfaces straight to a Linux framebuffer via mmap.
     Needed because SDL2 on Bookworm has no fbcon driver.
     Auto-detects resolution / bpp / line length from the device.
+
+    This runs once per frame on a single ARMv6 core, so it reuses its
+    scratch surfaces, converts pixels without piling up temporary copies,
+    and skips the write entirely when the frame is byte-identical to the
+    last one (an SPI panel re-scans every dirty page, so a skipped write is
+    real time saved, not just a memcpy avoided).
     """
 
     FBIOGET_VSCREENINFO = 0x4600
     FBIOGET_FSCREENINFO = 0x4602
+    FORCE_PUSH_S = 2.0     # repaint at least this often, even if unchanged
 
     def __init__(self, dev):
         self.dev = dev
@@ -130,7 +148,15 @@ class FBWriter:
         self.size = self.stride * self.h
         self.mm = mmap.mmap(self.fd, self.size, mmap.MAP_SHARED,
                             mmap.PROT_READ | mmap.PROT_WRITE)
+        self._canvas = None        # letterbox target, reused every frame
+        self._scaled = None        # scale() destination, reused every frame
+        self._last = None          # last bytes pushed, for identical-frame skip
+        self._last_push = 0.0      # when, so a static screen still gets refreshed
+        self._bgra = None          # does this pygame's tostring do BGRA?
         print(f"Framebuffer {dev}: {self.w}x{self.h} {self.bpp}bpp stride={self.stride}")
+        if _np is None:
+            print("Framebuffer: numpy not installed — pixel conversion will be "
+                  "slower than it needs to be (sudo apt install python3-numpy)")
 
     def blit(self, surface):
         with rot_lock:
@@ -143,21 +169,53 @@ class FBWriter:
             # preserve aspect ratio; letterbox rather than stretch
             k = min(self.w / sw, self.h / sh)
             nw, nh = max(1, int(sw * k)), max(1, int(sh * k))
-            scaled = pygame.transform.smoothscale(surface, (nw, nh))
-            canvas = pygame.Surface((self.w, self.h))
-            canvas.fill(C.get("BG", (0, 0, 0)))
-            canvas.blit(scaled, ((self.w - nw) // 2, (self.h - nh) // 2))
-            surface = canvas
-        if self.bpp == 16:
-            data = self._to565(surface)
-        else:
-            # 32bpp: framebuffer wants BGRX
-            raw = pygame.image.tostring(surface, "RGBX")
-            b = bytearray(raw)
-            b[0::4], b[2::4] = bytes(b[2::4]), bytes(b[0::4])
-            data = bytes(b)
+            # plain scale, not smoothscale: ARMv6 has no SIMD path for the
+            # smooth one and it alone can cost more than the whole UI draw
+            if self._scaled is None or self._scaled.get_size() != (nw, nh):
+                # match the source's pixel format so scale() can reuse it
+                self._scaled = pygame.Surface((nw, nh), 0, surface)
+            try:
+                pygame.transform.scale(surface, (nw, nh), self._scaled)
+            except ValueError:
+                # formats disagree after all — let pygame allocate
+                self._scaled = pygame.transform.scale(surface, (nw, nh))
+            if self._canvas is None:
+                self._canvas = pygame.Surface((self.w, self.h))
+            if (nw, nh) != (self.w, self.h):
+                self._canvas.fill(C.get("BG", (0, 0, 0)))
+            self._canvas.blit(self._scaled, ((self.w - nw) // 2,
+                                             (self.h - nh) // 2))
+            surface = self._canvas
+        data = self._to565(surface) if self.bpp == 16 else self._to32(surface)
+        # Skipping an identical frame saves the SPI panel a full re-scan, but
+        # it also means nothing overwrites whatever else may have drawn into
+        # the framebuffer behind our back (a stray console cursor, a kernel
+        # message). Push unconditionally every so often so the screen repairs
+        # itself even while the UI is standing still.
+        now = time.monotonic()
+        if data == self._last and (now - self._last_push) < self.FORCE_PUSH_S:
+            return False
+        self._last = data
+        self._last_push = now
         self.mm.seek(0)
         self.mm.write(data)
+        return True
+
+    def _to32(self, surface):
+        """32bpp framebuffers want BGRX."""
+        if self._bgra is None:
+            try:
+                pygame.image.tostring(surface, "BGRA")
+                self._bgra = True
+            except Exception:
+                self._bgra = False
+        if self._bgra:
+            # one pass in C, no Python-side channel shuffling at all
+            return pygame.image.tostring(surface, "BGRA")
+        raw = pygame.image.tostring(surface, "RGBX")
+        b = bytearray(raw)
+        b[0::4], b[2::4] = b[2::4], b[0::4]
+        return bytes(b)
 
     def _to565(self, surface):
         """Convert a surface to RGB565 bytes (vectorised when numpy present)."""
@@ -169,13 +227,22 @@ class FBWriter:
             b = arr[:, :, 2].astype(_np.uint16)
             v = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
             return v.astype("<u2").tobytes()
-        # slow fallback
+
+        # No numpy: still avoid a per-pixel Python loop. Split the channels
+        # with slicing, map them through 256-entry tables, then fold the two
+        # halves of each 565 byte together as one big-integer OR — every step
+        # runs in C, which is the difference between ~5 ms and ~1 s a frame.
         raw = pygame.image.tostring(surface, "RGB")
-        out = bytearray(self.w * self.h * 2)
-        for i in range(self.w * self.h):
-            r = raw[i*3]; g = raw[i*3+1]; b = raw[i*3+2]
-            v = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
-            out[i*2] = v & 0xFF; out[i*2+1] = (v >> 8) & 0xFF
+        n = len(raw) // 3
+        hi = (int.from_bytes(raw[0::3].translate(_T_R_F8), "big")
+              | int.from_bytes(raw[1::3].translate(_T_G_HI), "big")
+              ).to_bytes(n, "big")
+        lo = (int.from_bytes(raw[1::3].translate(_T_G_LO), "big")
+              | int.from_bytes(raw[2::3].translate(_T_B_LO), "big")
+              ).to_bytes(n, "big")
+        out = bytearray(n * 2)
+        out[0::2] = lo          # little-endian u2: low byte first
+        out[1::2] = hi
         return bytes(out)
 
     def close(self):
@@ -189,11 +256,110 @@ class FBWriter:
             pass
 
 
+# ── Linux console ─────────────────────────────────────────────────────────────
+KDSETMODE = 0x4B3A
+KD_TEXT = 0x00
+KD_GRAPHICS = 0x01
+KEEP_CONSOLE = "--keep-console" in ARGS
+
+
+class ConsoleGuard:
+    """
+    Stop the kernel's framebuffer console drawing on top of us.
+
+    We write pixels straight into /dev/fb*, but fbcon is attached to that
+    same memory and carries on painting its blinking block cursor — and any
+    kernel message — wherever the console text happened to leave off. On the
+    panel that shows up as a flashing black square sitting in the middle of
+    the map.
+
+    Three steps, weakest first, each independently useful because different
+    Pi images disagree about which ones exist:
+      1. turn off cursor blinking via sysfs,
+      2. send the hide-cursor / no-blanking escapes to the console device
+         (the console, not stdout — under systemd stdout is the journal,
+         which is why `setterm` in a unit file does nothing),
+      3. put the VT in KD_GRAPHICS, which makes fbcon stop drawing at all.
+
+    Everything is restored on the way out, including on SIGTERM, so stopping
+    the service leaves a usable console behind.
+    """
+
+    DEVICES = ("/dev/tty0", "/dev/console", "/dev/tty1")
+
+    def __init__(self):
+        self.fd = None
+        self.graphics = False
+
+    def take(self):
+        try:
+            with open("/sys/class/graphics/fbcon/cursor_blink", "w") as f:
+                f.write("0")
+        except Exception:
+            pass
+
+        for dev in self.DEVICES:
+            try:
+                self.fd = os.open(dev, os.O_RDWR | os.O_NOCTTY)
+                break
+            except Exception:
+                self.fd = None
+        if self.fd is None:
+            print("Console: no VT to quiet (run as root to hide the text cursor)")
+            return
+
+        try:
+            # hide cursor, stop the console blanking itself mid-ride
+            os.write(self.fd, b"\033[?25l\033[?17;0;0c\033[9;0]")
+        except Exception:
+            pass
+
+        if KEEP_CONSOLE:
+            print("Console: cursor hidden (--keep-console: leaving VT in text mode)")
+            return
+        try:
+            fcntl.ioctl(self.fd, KDSETMODE, KD_GRAPHICS)
+            self.graphics = True
+            print("Console: VT switched to graphics mode — fbcon will stay off us")
+        except Exception as e:
+            print(f"Console: could not take graphics mode ({e}); "
+                  "cursor is hidden but fbcon may still draw")
+
+    def release(self):
+        if self.fd is None:
+            return
+        try:
+            if self.graphics:
+                fcntl.ioctl(self.fd, KDSETMODE, KD_TEXT)
+            os.write(self.fd, b"\033[?25h")       # cursor back
+        except Exception:
+            pass
+        try:
+            os.close(self.fd)
+        except Exception:
+            pass
+        self.fd = None
+        self.graphics = False
+
+
+console = ConsoleGuard()
+
+
 # ── Config ────────────────────────────────────────────────────────────────────
 TCP_PORT = int(os.environ.get("TCP_PORT", "9999"))
 SCREEN_W = int(os.environ.get("SCREEN_W", "480"))
 SCREEN_H = int(os.environ.get("SCREEN_H", "320"))
-FPS = 12
+
+# Frame pacing. A Pi Zero W has one 1 GHz ARMv6 core to share between the
+# UI, the phone link and tile streaming, so the redraw rate follows what is
+# actually happening: quick while a finger is on the glass, moderate while
+# riding, near-idle when parked. main() also clamps these to whatever the
+# measured frame cost allows, so drawing can never eat the whole core.
+FPS_TOUCH = 15            # a finger is on the screen / a panel is open
+FPS_NAV = 10              # riding: position and turn updates coming in
+FPS_IDLE = 3              # parked, no route, nothing moving
+RENDER_BUDGET = 0.5       # never spend more than this share of the core drawing
+TOUCH_ACTIVE_S = 3.0      # treat the UI as "being used" this long after a touch
 
 # ── Themes ────────────────────────────────────────────────────────────────────
 THEMES = {
@@ -295,6 +461,26 @@ route_meta = {"dest": "", "km": 0.0, "sec": 0.0}
 route_lock = threading.Lock()
 STEP_MODE = False         # True once the phone sends steps (standalone nav)
 
+# Everything derived from the route, republished as one immutable snapshot
+# whenever route_pts changes: (points, cumulative_metres, cell_grid).
+#
+#  * cumulative metres turns "how far to the next turn", "how much is left"
+#    and "which stretch is on screen" into an index lookup or a bisect,
+#    instead of walking the trip every GPS fix and every frame;
+#  * the cell grid buckets point indices into ~550 m squares, so the map can
+#    find every leg of the trip that passes near the viewport — including
+#    ones that loop back — without testing all few thousand points;
+#  * and because the snapshot is immutable, readers take it with a single
+#    global read rather than copying a few thousand points out from under a
+#    lock on each frame.
+route_snapshot = ((), (), {})
+route_gen = 0             # bumped whenever the snapshot is replaced
+ROUTE_CELL_DEG = 0.005
+# where the rider was on the route last time, and for which query position
+_pos_hint = {"gen": -1, "i": 0, "lat": None, "lon": None}
+_hint_lock = threading.Lock()
+ROUTE_HINT_ACCEPT_M = 250.0   # a windowed answer is only trusted this close
+
 # "minimal"  = Google mode: route only, everything else greyed right back
 # "detailed" = OSM mode: full street map from the downloaded region
 map_detail = "detailed"
@@ -376,13 +562,31 @@ def sun_times(lat, lon, when=None):
         return None, None
 
 
+_sun_cache = {"key": None, "val": (None, None)}
+
+
+def sun_times_cached(lat, lon, when):
+    """
+    sun_times() is a page of trigonometry and resolve_theme() runs it on
+    every frame. Sunrise doesn't move within a day, or within ~11 km of
+    where it was last asked, so keep the answer.
+    """
+    if lat is None or lon is None:
+        return None, None
+    key = (round(lat, 1), round(lon, 1), when.toordinal())
+    if _sun_cache["key"] != key:
+        _sun_cache["val"] = sun_times(lat, lon, when)
+        _sun_cache["key"] = key
+    return _sun_cache["val"]
+
+
 def resolve_theme(d):
     with theme_lock:
         mode = theme_mode
     if mode in ("day", "night"):
         return mode
-    sr, ss = sun_times(d.get("lat"), d.get("lon"))
     now = now_dt()
+    sr, ss = sun_times_cached(d.get("lat"), d.get("lon"), now)
     now_min = now.hour * 60 + now.minute
     if sr is None:
         return "day" if 390 <= now_min <= 1110 else "night"   # 06:30–18:30
@@ -431,12 +635,32 @@ def moved_enough(a, b, min_m=2.0):
 # ══════════════════════════════════════════════════════════════════════════════
 #  DRAWING
 # ══════════════════════════════════════════════════════════════════════════════
+# Rendering a glyph run is one of the most expensive things pygame does on
+# an ARMv6 core, and most of what this UI draws ("MOTONAV", "ETA", "km/h",
+# the current speed, the clock) repeats frame after frame. Cache the
+# rendered surfaces; a few hundred small ones cost far less RAM than
+# re-rasterising them ten times a second costs CPU.
+_text_cache = {}
+_TEXT_CACHE_MAX = 512
+
+
+def _render_text(font, s, col, max_w=None):
+    key = (id(font), s, col, max_w)
+    img = _text_cache.get(key)
+    if img is None:
+        t = s
+        if max_w:
+            while font.size(t)[0] > max_w and len(t) > 2:
+                t = t[:-2] + "…"
+        img = font.render(t, True, col)
+        if len(_text_cache) >= _TEXT_CACHE_MAX:
+            _text_cache.clear()
+        _text_cache[key] = img
+    return img
+
+
 def text(surf, s, font, col, x, y, align="left", max_w=None):
-    s = str(s)
-    if max_w:
-        while font.size(s)[0] > max_w and len(s) > 2:
-            s = s[:-2] + "…"
-    img = font.render(s, True, col)
+    img = _render_text(font, str(s), col, max_w)
     r = img.get_rect()
     if align == "center":
         r.centerx = x
@@ -582,148 +806,215 @@ def draw_map(surf, fonts, d, rect):
         for gy in range(ry - oy, ry + rh + sp, sp):
             pygame.draw.line(surf, C["GRID"], (rx, gy), (rx + rw, gy), 1)
 
+    # Projection constants, hoisted out of the per-point loops. A math.cos()
+    # left inside a loop that runs over thousands of road points is a frame
+    # the Pi Zero never finishes.
+    kx = MDEG * math.cos(math.radians(lat)) if lat is not None else MDEG
+    rot = (brg is not None and not panned)   # heading-up riding, north-up exploring
+    if rot:
+        _a = math.radians(brg)
+        rc, rs = math.cos(_a), math.sin(_a)
+    else:
+        rc, rs = 1.0, 0.0
+    inv = 1.0 / MPP
+
+    def project(pts):
+        """Lat/lon sequence -> screen points. Deliberately flat and local."""
+        out = []
+        add = out.append
+        if rot:
+            for p in pts:
+                ex = (p[1] - lon) * kx
+                ny = (p[0] - lat) * MDEG
+                ex, ny = ex * rc - ny * rs, ex * rs + ny * rc
+                add((int(cx + (ex - pan_dx) * inv), int(cy - (ny - pan_dy) * inv)))
+        else:
+            for p in pts:
+                ex = (p[1] - lon) * kx - pan_dx
+                ny = (p[0] - lat) * MDEG - pan_dy
+                add((int(cx + ex * inv), int(cy - ny * inv)))
+        return out
+
     def to_screen(plat, plon):
-        dlat = (plat - lat) * MDEG
-        dlon = (plon - lon) * MDEG * math.cos(math.radians(lat))
-        ex, ny = dlon, dlat
-        # heading-up only while following; north-up while exploring
-        if brg is not None and not panned:
-            a = math.radians(brg)
-            ex, ny = ex*math.cos(a) - ny*math.sin(a), ex*math.sin(a) + ny*math.cos(a)
-        ex -= pan_dx
-        ny -= pan_dy
-        return (int(cx + ex / MPP), int(cy - ny / MPP))
+        ex = (plon - lon) * kx
+        ny = (plat - lat) * MDEG
+        if rot:
+            ex, ny = ex * rc - ny * rs, ex * rs + ny * rc
+        return (int(cx + (ex - pan_dx) * inv), int(cy - (ny - pan_dy) * inv))
+
+    # Geographic box the panel could possibly show (rotation-safe: sized off
+    # the panel's diagonal). Everything below rejects against this *before*
+    # projecting a single point.
+    if lat is not None:
+        view_r = 0.5 * math.hypot(rw, rh) * MPP + 8 * MPP
+        cen_ex = pan_dx * rc + pan_dy * rs if rot else pan_dx
+        cen_ny = -pan_dx * rs + pan_dy * rc if rot else pan_dy
+        v_lat, v_lon = lat + cen_ny / MDEG, lon + cen_ex / kx
+        d_lat, d_lon = view_r / MDEG, view_r / kx
+        vs, vn = v_lat - d_lat, v_lat + d_lat
+        vw, ve = v_lon - d_lon, v_lon + d_lon
+    else:
+        vs = vn = vw = ve = 0.0
+
+    def visible_runs(pts, lo=0, hi=None):
+        """
+        Project only the stretches that can reach the panel, split at gaps.
+
+        A point just outside the view is kept when a neighbour is inside, so
+        a line crossing the edge is still drawn all the way to it rather
+        than stopping short at the last strictly-visible point.
+        """
+        hi = len(pts) if hi is None else min(hi, len(pts))
+        lo = max(0, lo)
+        n = hi - lo
+        if n < 2:
+            return []
+        inside = [vs <= pts[k][0] <= vn and vw <= pts[k][1] <= ve
+                  for k in range(lo, hi)]
+        runs, run = [], []
+        for j in range(n):
+            if inside[j] or (j and inside[j - 1]) or (j + 1 < n and inside[j + 1]):
+                run.append(to_screen(*pts[lo + j]))
+            else:
+                if len(run) >= 2:
+                    runs.append(run)
+                run = []
+        if len(run) >= 2:
+            runs.append(run)
+        return runs
 
     minimal = (map_detail == "minimal")
 
     # ── real OSM roads ──
-    if have_map and not minimal:
-        span_m = max(rw, rh) * MPP * 0.75
+    if have_map and lat is not None:
+        # zoomed right out, minor streets are pixel mush — drop them rather
+        # than pay to project and stroke points nobody can read
+        if minimal:
+            max_cls = 5          # ghost the main grid only, so junctions read
+        elif MPP > 3.0:
+            max_cls = 4
+        elif MPP > 1.8:
+            max_cls = 6
+        else:
+            max_cls = 7
+        span_m = max(rw, rh) * MPP * (0.6 if minimal else 0.75)
         try:
-            near = tiles.ways_near(lat, lon, radius_m=span_m)
-            # casing pass then fill pass so junctions look right
-            for style_pass in (0, 1):
-                for cls, pts in near:
-                    w_fill, w_case, major = tilestore.CLASS_STYLE.get(cls, (2, 3, False))
-                    if style_pass == 0:
-                        col, wdt = C["ROADCASE"], w_case
-                    else:
-                        col, wdt = C["ROADFILL"], w_fill
-                    scr = [to_screen(p[0], p[1]) for p in pts]
-                    # cheap cull: skip ways entirely off-panel
-                    if all(x < rx - 40 or x > rx + rw + 40 or
-                           y < ry - 40 or y > ry + rh + 40 for x, y in scr):
-                        continue
-                    if len(scr) >= 2:
-                        pygame.draw.lines(surf, col, False, scr, max(1, int(wdt)))
-        except Exception:
-            pass
-
-    # ── minimal mode: only ghost the surrounding roads so junctions read ──
-    if have_map and minimal and lat is not None:
-        try:
-            for cls, wpts in tiles.ways_near(lat, lon, radius_m=max(rw, rh) * MPP * 0.6):
-                if cls > 5:          # skip residential clutter entirely
+            drawn = []
+            for w in tiles.ways_near(lat, lon, radius_m=span_m):
+                if w[0] > max_cls:
                     continue
-                scr = [to_screen(p[0], p[1]) for p in wpts]
-                if all(x < rx - 30 or x > rx + rw + 30 or
-                       y < ry - 30 or y > ry + rh + 30 for x, y in scr):
+                # bounding-box reject: four comparisons instead of projecting
+                # every point of a way that cannot be on screen
+                if w[4] < vs or w[2] > vn or w[5] < vw or w[3] > ve:
                     continue
+                scr = project(w[1])
                 if len(scr) >= 2:
-                    pygame.draw.lines(surf, C["GHOSTROAD"], False, scr, 2)
+                    drawn.append((w[0], scr))
+            if minimal:
+                ghost = C["GHOSTROAD"]
+                for _cls, scr in drawn:
+                    pygame.draw.lines(surf, ghost, False, scr, 2)
+            else:
+                # casing pass then fill pass so junctions look right — the
+                # projection is now shared between them, not redone
+                style = tilestore.CLASS_STYLE
+                case, fill = C["ROADCASE"], C["ROADFILL"]
+                for cls, scr in drawn:
+                    pygame.draw.lines(surf, case, False, scr,
+                                      max(1, int(style.get(cls, (2, 3, False))[1])))
+                for cls, scr in drawn:
+                    pygame.draw.lines(surf, fill, False, scr,
+                                      max(1, int(style.get(cls, (2, 3, False))[0])))
         except Exception:
             pass
 
     # ── FULL ROUTE (whole trip, drawn first so the rest sits on top) ──
+    rpts, rcum, rgrid, i_here = (), (), {}, 0
     if lat is not None:
-        with route_lock:
-            rpts = list(route_pts)
-        if len(rpts) >= 2:
-            # cheap culling: keep points within a generous box of the view
-            span_m = max(rw, rh) * MPP * 1.8
-            dlat = span_m / 111320.0
-            dlon = span_m / max(1.0, 111320.0 * math.cos(math.radians(lat)))
-            vis, run = [], []
-            for (pla, plo) in rpts:
-                if abs(pla - lat) <= dlat and abs(plo - lon) <= dlon:
-                    run.append(to_screen(pla, plo))
+        rpts, rcum, rgrid = route_snapshot      # immutable: no copy needed
+
+    if len(rpts) >= 2:
+        i_here = route_index_near(rpts, lat, lon)
+        # Ask the spatial index which parts of the trip are near the viewport
+        # — including other legs that loop back through here, which a simple
+        # "stretch either side of the rider" slice would miss. Neighbours of
+        # each hit come along so lines still reach the panel edge.
+        cand = set()
+        if rgrid:
+            floor = math.floor
+            y0, y1 = int(floor(vs / ROUTE_CELL_DEG)), int(floor(vn / ROUTE_CELL_DEG))
+            x0, x1 = int(floor(vw / ROUTE_CELL_DEG)), int(floor(ve / ROUTE_CELL_DEG))
+            for gy in range(y0, y1 + 1):
+                for gx in range(x0, x1 + 1):
+                    for i in rgrid.get((gy, gx), ()):
+                        cand.add(i - 1)
+                        cand.add(i)
+                        cand.add(i + 1)
+        n_r = len(rpts)
+        runs, run, prev = [], [], None
+        for k in sorted(cand):
+            if k < 0 or k >= n_r:
+                continue
+            if prev is not None and k != prev + 1:
+                if len(run) >= 2:
+                    runs.append(run)
+                run = []
+            run.append(to_screen(*rpts[k]))
+            prev = k
+        if len(run) >= 2:
+            runs.append(run)
+        for seg in runs:
+            try:
+                if minimal:
+                    pygame.draw.lines(surf, C["ROUTEFAR"], False, seg, 7)
                 else:
-                    if len(run) >= 2:
-                        vis.append(run)
-                    run = []
-            if len(run) >= 2:
-                vis.append(run)
-            for seg in vis:
-                try:
-                    if minimal:
-                        pygame.draw.lines(surf, C["ROUTEFAR"], False, seg, 7)
-                    else:
-                        pygame.draw.lines(surf, C["ROADCASE"], False, seg, 13)
-                        pygame.draw.lines(surf, C["ROUTEFAR"], False, seg, 9)
-                except Exception:
-                    pass
+                    pygame.draw.lines(surf, C["ROADCASE"], False, seg, 13)
+                    pygame.draw.lines(surf, C["ROUTEFAR"], False, seg, 9)
+            except Exception:
+                pass
 
     # ── PAST trail (dimmed — where you've been) ──
     if lat is not None:
         with trail_lock:
-            pts = list(trail)
-        if len(pts) >= 2:
-            scr = [to_screen(p[0], p[1]) for p in pts]
-            try:
-                pygame.draw.lines(surf, C["PASTCASE"], False, scr, 9)
-                pygame.draw.lines(surf, C["PAST"], False, scr, 6)
-            except Exception:
-                pass
+            tpts = list(trail)
+        if len(tpts) >= 2:
+            for scr in visible_runs(tpts):
+                try:
+                    pygame.draw.lines(surf, C["PASTCASE"], False, scr, 9)
+                    pygame.draw.lines(surf, C["PAST"], False, scr, 6)
+                except Exception:
+                    pass
 
     # ── AHEAD path ──
     turn_pt = None
     road_drawn = False
 
     # 1) BEST: we have the real route — draw the part still ahead of us.
-    if lat is not None:
-        with route_lock:
-            rp = list(route_pts)
-        if len(rp) >= 2:
-            # where are we on the route?
-            best_i, best_d = 0, float("inf")
-            for i, p in enumerate(rp):
-                dd = abs(p[0] - lat) + abs(p[1] - lon)
-                if dd < best_d:
-                    best_d, best_i = dd, i
+    if len(rpts) >= 2:
+        # only trust the match if we're actually near the line
+        if _seg_len((lat, lon), rpts[i_here]) < 150:
+            # trim to what fits on screen so we don't draw the whole trip twice
+            span_m = max(rw, rh) * MPP * 1.6
+            if len(rcum) == len(rpts):
+                cut = bisect.bisect_right(rcum, rcum[i_here] + span_m) + 2
+            else:
+                cut = len(rpts)
+            seg = project(rpts[i_here:min(len(rpts), cut)])
+            if len(seg) >= 2:
+                try:
+                    pygame.draw.lines(surf, C["ROUTEGLOW"], False, seg, 13)
+                    pygame.draw.lines(surf, C["ROADCASE"], False, seg, 9)
+                    pygame.draw.lines(surf, C["ROUTE"], False, seg, 6)
+                    road_drawn = True
+                except Exception:
+                    pass
 
-            # only trust it if we're actually near the line
-            near_m = _seg_len((lat, lon), rp[best_i])
-            if near_m < 150:
-                ahead = rp[best_i:]
-                # trim to what fits on screen so we don't draw the whole trip twice
-                span_m = max(rw, rh) * MPP * 1.6
-                acc, cut = 0.0, len(ahead)
-                for i in range(len(ahead) - 1):
-                    acc += _seg_len(ahead[i], ahead[i + 1])
-                    if acc > span_m:
-                        cut = i + 2
-                        break
-                seg = [to_screen(p[0], p[1]) for p in ahead[:cut]]
-                if len(seg) >= 2:
-                    try:
-                        pygame.draw.lines(surf, C["ROUTEGLOW"], False, seg, 13)
-                        pygame.draw.lines(surf, C["ROADCASE"], False, seg, 9)
-                        pygame.draw.lines(surf, C["ROUTE"], False, seg, 6)
-                        road_drawn = True
-                    except Exception:
-                        pass
-
-                # marker at the next maneuver, if we know it
-                dist_m = d.get("distance_m")
-                if dist_m:
-                    acc, mk = 0.0, None
-                    for i in range(best_i, len(rp) - 1):
-                        acc += _seg_len(rp[i], rp[i + 1])
-                        if acc >= dist_m:
-                            mk = rp[i + 1]
-                            break
-                    if mk:
-                        turn_pt = to_screen(mk[0], mk[1])
+            # marker at the next maneuver, if we know it
+            dist_m = d.get("distance_m")
+            if dist_m and len(rcum) == len(rpts):
+                j = bisect.bisect_left(rcum, rcum[i_here] + dist_m)
+                if 0 < j < len(rpts):
+                    turn_pt = to_screen(*rpts[j])
 
     # 2) FALLBACK: no route loaded — approximate from the turn data alone
     if not road_drawn:
@@ -1077,6 +1368,129 @@ def _seg_len(a, b):
     return math.hypot(dlat, dlon)
 
 
+# ── route indexing ───────────────────────────────────────────────────────
+# These back everything that needs to know "where am I on the route". They
+# are called from the GPS thread once a second and from the draw loop every
+# frame, so none of them may walk the whole trip in the common case.
+def publish_route():
+    """
+    Rebuild route_snapshot from route_pts. Call with route_lock held,
+    whenever route_pts has changed.
+    """
+    global route_gen, route_snapshot
+    pts = tuple(route_pts)
+    cum = [0.0]
+    total = 0.0
+    for i in range(len(pts) - 1):
+        total += _seg_len(pts[i], pts[i + 1])
+        cum.append(total)
+
+    grid = {}
+    floor = math.floor
+    for i, (la, lo) in enumerate(pts):
+        grid.setdefault((int(floor(la / ROUTE_CELL_DEG)),
+                         int(floor(lo / ROUTE_CELL_DEG))), []).append(i)
+
+    route_snapshot = (pts, tuple(cum), grid)
+    route_gen += 1
+    with _hint_lock:
+        _pos_hint["gen"] = -1
+        _pos_hint["i"] = 0
+        _pos_hint["lat"] = _pos_hint["lon"] = None
+
+
+def _nearest_in(pts, lat, lon, lo, hi):
+    """Cheapest-metric nearest point within pts[lo:hi]. Returns (index, dist)."""
+    best_i, best_d = lo, float("inf")
+    for i in range(lo, hi):
+        p = pts[i]
+        d = abs(p[0] - lat) + abs(p[1] - lon)
+        if d < best_d:
+            best_d, best_i = d, i
+    return best_i, best_d
+
+
+def route_index_near(pts, lat, lon):
+    """
+    Index of the route point nearest (lat, lon).
+
+    A full scan several times a second was the single biggest thing pinning
+    the Pi's core, so this searches a window around where the rider was last
+    time. The window is only believed if it actually lands us on the road:
+    a stale hint — a GPS jump, a fresh route, or a road that passes close to
+    another part of itself — shows up either as a candidate pinned to the
+    window's edge or as one that is nowhere near us, and both fall back to
+    a full scan.
+
+    The answer is also memoised per query position, because the draw loop
+    asks once a frame while the GPS only moves once a second.
+    """
+    n = len(pts)
+    if n == 0:
+        return 0
+    with _hint_lock:
+        gen, hint = _pos_hint["gen"], _pos_hint["i"]
+        qlat, qlon = _pos_hint["lat"], _pos_hint["lon"]
+    if gen == route_gen and qlat == lat and qlon == lon and qlat is not None:
+        return hint
+
+    found = None
+    if gen == route_gen and 0 <= hint < n:
+        lo, hi = max(0, hint - 24), min(n, hint + 128)
+        cand, cd = _nearest_in(pts, lat, lon, lo, hi)
+        # cd is |dlat|+|dlon| in degrees; scaling both by the latitude degree
+        # keeps this a safe over-estimate of the real distance
+        if (cd * 111320.0 < ROUTE_HINT_ACCEPT_M
+                and (cand > lo or lo == 0) and (cand < hi - 1 or hi == n)):
+            found = cand
+    if found is None:
+        found, _ = _nearest_in(pts, lat, lon, 0, n)
+    with _hint_lock:
+        _pos_hint["gen"] = route_gen
+        _pos_hint["i"] = found
+        _pos_hint["lat"], _pos_hint["lon"] = lat, lon
+    return found
+
+
+_steps_idx = {"gen": -1, "n": -1, "idx": []}
+
+
+def _index_steps(pts, steps):
+    """
+    Route-point index of each maneuver.
+
+    Maneuvers come in route order, so this walks the route once rather than
+    scanning it from the top for every step. Computed once per route and
+    cached — it used to run inside every GPS fix.
+    """
+    out = []
+    n = len(pts)
+    start = 0
+    for s in steps:
+        slat, slon = s["lat"], s["lon"]
+        best_i, best_d, miss = start, float("inf"), 0
+        for i in range(start, n):
+            d = abs(pts[i][0] - slat) + abs(pts[i][1] - slon)
+            if d < best_d:
+                best_d, best_i, miss = d, i, 0
+            else:
+                miss += 1
+                if miss > 400:      # well past it; stop walking
+                    break
+        out.append(best_i)
+        start = best_i
+    return out
+
+
+def _step_indices(pts, steps):
+    if (_steps_idx["gen"] != route_gen or _steps_idx["n"] != len(steps)
+            or len(_steps_idx["idx"]) != len(steps)):
+        _steps_idx["idx"] = _index_steps(pts, steps)
+        _steps_idx["gen"] = route_gen
+        _steps_idx["n"] = len(steps)
+    return _steps_idx["idx"]
+
+
 def update_step_guidance(lat, lon):
     """
     Standalone turn-by-turn: work out where we are along the route and
@@ -1086,35 +1500,39 @@ def update_step_guidance(lat, lon):
     if not STEP_MODE or lat is None:
         return
     with route_lock:
-        pts = list(route_pts)
+        pts, cum, _grid = route_snapshot
         steps = list(route_steps)
-    if len(pts) < 2 or not steps:
+        total_km = route_meta.get("km", 0.0)
+        total_sec = route_meta.get("sec", 0.0)
+    if len(pts) < 2 or not steps or len(cum) != len(pts):
         return
 
-    # nearest point on the route to us
-    best_i, best_d = 0, float("inf")
-    for i, p in enumerate(pts):
-        d = _seg_len((lat, lon), p)
-        if d < best_d:
-            best_d, best_i = d, i
+    best_i = route_index_near(pts, lat, lon)
+    step_at = _step_indices(pts, steps)
 
     # the next maneuver ahead of that point
-    nxt = None
-    for s in steps:
-        si = _nearest_route_index(pts, s["lat"], s["lon"])
-        if si > best_i + 1:
-            nxt = (s, si)
+    step, si = steps[-1], len(pts) - 1
+    for k, idx in enumerate(step_at):
+        if idx > best_i + 1:
+            step, si = steps[k], idx
             break
-    if nxt is None:
-        nxt = (steps[-1], len(pts) - 1)
-    step, si = nxt
 
-    # distance along the route from us to that maneuver
-    dist = _seg_len((lat, lon), pts[best_i])
-    for i in range(best_i, min(si, len(pts) - 1)):
-        dist += _seg_len(pts[i], pts[i + 1])
+    # distance along the route from us to that maneuver, plus however far
+    # off the line we currently are
+    off_m = _seg_len((lat, lon), pts[best_i])
+    si = min(si, len(pts) - 1)
+    dist = off_m + max(0.0, cum[si] - cum[best_i])
+    remain_m = off_m + max(0.0, cum[-1] - cum[best_i])
 
     arrived = step["m"] == "destination" and dist < 30
+
+    # scale OSRM's own duration by how much route is left — this is
+    # far better than assuming an average speed
+    total_m = total_km * 1000.0
+    if total_sec > 0 and total_m > 0:
+        secs = int(total_sec * max(0.0, min(1.0, remain_m / total_m)))
+    else:
+        secs = int(remain_m / (35 * 1000 / 3600))
 
     with nav_lock:
         nav["instruction"] = step["t"]
@@ -1124,42 +1542,8 @@ def update_step_guidance(lat, lon):
         nav["distance_raw"] = (f"{dist/1000:.1f} km" if dist >= 1000
                                else f"{int(round(dist))} m")
         nav["arrived"] = arrived
-        # remaining distance along the whole route
-        remain_m = dist
-        for i in range(si, len(pts) - 1):
-            remain_m += _seg_len(pts[i], pts[i + 1])
-
-        # scale OSRM's own duration by how much route is left — this is
-        # far better than assuming an average speed
-        with route_lock:
-            total_km = route_meta.get("km", 0.0)
-            total_sec = route_meta.get("sec", 0.0)
-        total_m = total_km * 1000.0
-        if total_sec > 0 and total_m > 0:
-            secs = int(total_sec * max(0.0, min(1.0, remain_m / total_m)))
-        else:
-            secs = int(remain_m / (35 * 1000 / 3600))
         nav["duration_s"] = secs
         nav["eta_seconds"] = secs
-
-
-_idx_cache = {}
-
-
-def _nearest_route_index(pts, lat, lon):
-    key = (round(lat, 5), round(lon, 5), len(pts))
-    hit = _idx_cache.get(key)
-    if hit is not None:
-        return hit
-    best, bd = 0, float("inf")
-    for i, p in enumerate(pts):
-        d = abs(p[0] - lat) + abs(p[1] - lon)
-        if d < bd:
-            bd, best = d, i
-    if len(_idx_cache) > 512:
-        _idx_cache.clear()
-    _idx_cache[key] = best
-    return best
 
 
 def clear_guidance(reason=""):
@@ -1197,6 +1581,7 @@ def clear_navigation(reason=""):
         route_meta["dest"] = ""
         route_meta["km"] = 0.0
         route_meta["sec"] = 0.0
+        publish_route()
     globals()["STEP_MODE"] = False
     if reason:
         print(f"Navigation cleared: {reason} (route pts dropped: {had})")
@@ -1265,6 +1650,7 @@ def handle_message(msg, source="WIFI"):
                 route_meta["dest"] = msg.get("dest", "")
                 route_meta["km"] = float(msg.get("km", 0) or 0)
                 route_meta["sec"] = float(msg.get("sec", 0) or 0)
+                publish_route()
             print(f"ROUTE: {len(out)} pts -> {route_meta['dest']} "
                   f"({route_meta['km']:.1f} km)")
             with _gap_lock:
@@ -1345,6 +1731,7 @@ def handle_message(msg, source="WIFI"):
             route_pts.clear()
             route_steps.clear()
             route_meta["dest"] = ""
+            publish_route()
         globals()["STEP_MODE"] = False
         print("ROUTE: cleared")
         return
@@ -1746,6 +2133,7 @@ def demo_feeder():
     with route_lock:
         route_pts.clear()
         route_pts.extend(pts)
+        publish_route()
         route_meta["dest"] = "Demo Loop"
         route_meta["km"] = total_m / 1000.0
         route_meta["sec"] = total_m / DEMO_SPEED_MPS
@@ -1823,11 +2211,20 @@ def _run(cmd, timeout=12):
         return 1, "", str(e)
 
 
-def wifi_refresh(rescan=False):
-    """Update current connection + list of visible networks."""
-    with wifi_lock:
-        wifi_state["busy"] = True
-        wifi_state["msg"] = "Scanning..." if rescan else "Refreshing..."
+def wifi_refresh(rescan=False, light=False):
+    """
+    Update current connection + list of visible networks.
+
+    `light` does only the "what am I connected to" query, which is all the
+    top bar needs. Each nmcli invocation forks a process and talks to
+    NetworkManager over D-Bus; four of them every 20 seconds is a visible
+    hitch on a Pi Zero W, so the background poller stays light and the full
+    picture is gathered only when the WiFi panel is actually open.
+    """
+    if not light:
+        with wifi_lock:
+            wifi_state["busy"] = True
+            wifi_state["msg"] = "Scanning..." if rescan else "Refreshing..."
 
     # current connection
     rc, out, _ = _run(["nmcli", "-t", "-f", "ACTIVE,SSID,SIGNAL", "dev", "wifi"])
@@ -1838,6 +2235,12 @@ def wifi_refresh(rescan=False):
             if len(parts) >= 3 and parts[0] == "yes":
                 cur_ssid, cur_sig = parts[1], parts[2]
                 break
+
+    if light:
+        with wifi_lock:
+            wifi_state["ssid"] = cur_ssid
+            wifi_state["signal"] = cur_sig
+        return
 
     # saved profiles
     saved = set()
@@ -1910,12 +2313,13 @@ def wifi_worker(action, arg=None):
 
 
 def wifi_poller():
+    """Keep the top-bar WiFi chip current without taxing the core."""
     while True:
         try:
-            wifi_refresh()
+            wifi_refresh(light=not wifi_panel_open)
         except Exception:
             pass
-        time.sleep(20)
+        time.sleep(10 if wifi_panel_open else 45)
 
 
 def signal_bars(sig):
@@ -1985,22 +2389,23 @@ def save_region_bytes(blob):
             return False
         n_ways = struct.unpack_from("<I", blob, 6 + 32)[0]
         off = 6 + 32 + 4
+        total = len(blob)
         ways = []
         for _ in range(n_ways):
-            if off + 3 > len(blob):
+            if off + 3 > total:
                 break
             cls, npts = struct.unpack_from("<BH", blob, off)
             off += 3
             need = npts * 8
-            if off + need > len(blob):
+            if off + need > total:
                 break
-            pts = []
-            for i in range(npts):
-                a, b = struct.unpack_from("<ii", blob, off + i * 8)
-                pts.append((a / 1e6, b / 1e6))
-            off += need
             if npts >= 2:
-                ways.append((cls, pts))
+                # one bulk unpack per way; per-point unpack_from on an ARMv6
+                # core is slow enough to stall the UI while a fill lands
+                v = tilestore._pt_struct(npts * 2).unpack_from(blob, off)
+                ways.append((cls, [(v[i] / 1e6, v[i + 1] / 1e6)
+                                   for i in range(0, len(v), 2)]))
+            off += need
         touched = tiles.store_ways(ways)
         print(f"Maps: +{len(ways)} roads into {len(touched)} tiles "
               f"({len(blob)//1024} KB)")
@@ -2068,7 +2473,7 @@ def _dir_size(path):
 # advances, the window slides forward and pulls in fresh ground — the
 # buffer stays topped up but the Pi (and the phone's radio) is never asked
 # to move the whole map in one go.
-BUFFER_AHEAD_KM = 15.0     # how far up the road tiles are kept ready
+BUFFER_AHEAD_KM = 8.0      # how far up the road tiles are kept ready
 BUFFER_BEHIND_KM = 1.5     # small margin behind the rider
 GAP_CHECK_MIN_S = 20.0     # don't re-check coverage more often than this
 GAP_CHECK_MOVE_M = 800.0   # ...unless the rider has moved at least this far
@@ -2077,42 +2482,24 @@ _gap_state = {"t": 0.0, "lat": None, "lon": None}
 _gap_lock = threading.Lock()
 
 
-def _nearest_index(pts, lat, lon):
-    best_i, best_d2 = 0, None
-    for i, (la, lo) in enumerate(pts):
-        dlat = (la - lat) * tilestore.M_PER_DEG
-        dlon = (lo - lon) * tilestore.M_PER_DEG * math.cos(math.radians(lat))
-        d2 = dlat * dlat + dlon * dlon
-        if best_d2 is None or d2 < best_d2:
-            best_d2, best_i = d2, i
-    return best_i
-
-
-def _route_window(pts, lat, lon, ahead_km, behind_km):
+def _route_window(pts, cum, lat, lon, ahead_km, behind_km):
     """
     Slice the route to the stretch around the rider — behind_km back,
     ahead_km ahead, measured along the route from the closest point —
     so gap checks only ever cover the buffer, not the whole trip.
+
+    Distances come from the route's precomputed cumulative table, so this
+    is a windowed search plus two bisects rather than a walk down the trip.
     """
     if len(pts) < 2 or lat is None or lon is None:
         return None
-    i0 = _nearest_index(pts, lat, lon)
-
-    def walk(step, budget_m):
-        out = [pts[i0]]
-        dist, i = 0.0, i0
-        while 0 <= i + step < len(pts) and dist < budget_m:
-            nxt = pts[i + step]
-            dist += math.hypot(
-                (nxt[0] - pts[i][0]) * tilestore.M_PER_DEG,
-                (nxt[1] - pts[i][1]) * tilestore.M_PER_DEG * math.cos(math.radians(nxt[0])))
-            out.append(nxt)
-            i += step
-        return out
-
-    back = walk(-1, behind_km * 1000.0)
-    fwd = walk(1, ahead_km * 1000.0)
-    return list(reversed(back))[:-1] + fwd
+    i0 = route_index_near(pts, lat, lon)
+    if len(cum) != len(pts):
+        return pts
+    here = cum[i0]
+    lo = bisect.bisect_left(cum, here - behind_km * 1000.0)
+    hi = bisect.bisect_right(cum, here + ahead_km * 1000.0)
+    return pts[max(0, lo):min(len(pts), hi + 1)]
 
 
 def report_map_gaps(transport="WIFI", ahead_km=None, behind_km=BUFFER_BEHIND_KM):
@@ -2129,7 +2516,7 @@ def report_map_gaps(transport="WIFI", ahead_km=None, behind_km=BUFFER_BEHIND_KM)
     if tiles is None or tilestore is None:
         return
     with route_lock:
-        pts = list(route_pts)
+        pts, cum, _grid = route_snapshot
     if len(pts) < 2:
         return
 
@@ -2137,7 +2524,7 @@ def report_map_gaps(transport="WIFI", ahead_km=None, behind_km=BUFFER_BEHIND_KM)
     if ahead_km:
         with nav_lock:
             lat, lon = nav.get("lat"), nav.get("lon")
-        window = _route_window(pts, lat, lon, ahead_km, behind_km)
+        window = _route_window(pts, cum, lat, lon, ahead_km, behind_km)
     use_pts = window if window else pts
     label = "buffer" if window else "route"
 
@@ -3407,8 +3794,19 @@ def map_touch(raw_x, raw_y):
     return (max(0, min(SCREEN_W - 1, sx)), max(0, min(SCREEN_H - 1, sy)))
 
 
+TOUCH_QUEUE_MAX = 64      # a slow frame must never let these grow unbounded
+
+
 def touch_thread():
-    """Read raw touch events; convert to screen coords and record taps."""
+    """
+    Read raw touch events; convert to screen coords and record taps.
+
+    Opened unbuffered and drained in batches: a buffered read() blocks until
+    it has the full request, and one syscall per 16-byte event is a lot of
+    kernel round-trips for a core that also has to draw. Motion events are
+    coalesced too — only the newest finger position matters for panning, and
+    a backlog of stale ones just makes the drag trail behind the finger.
+    """
     load_touch_cal()
     devs = _find_touch_devices()
     if not devs:
@@ -3422,51 +3820,63 @@ def touch_thread():
     down_x = down_y = None
     moved = False
     debug = "--touchdebug" in ARGS
+    pending = b""
     try:
-        with open(dev, "rb") as f:
+        with open(dev, "rb", buffering=0) as f:
             while True:
-                data = f.read(sz)
-                if not data or len(data) < sz:
+                chunk = f.read(sz * 32)
+                if not chunk:
                     continue
-                _, _, etype, code, value = struct.unpack(fmt, data)
-                if etype == EV_ABS:
-                    if code in (ABS_X, ABS_MT_POSITION_X):
-                        raw_x = value
-                    elif code in (ABS_Y, ABS_MT_POSITION_Y):
-                        raw_y = value
-                elif etype == EV_KEY and code == BTN_TOUCH:
-                    if value == 1:
-                        down_x, down_y = raw_x, raw_y
-                        if raw_x is not None:
+                data = pending + chunk if pending else chunk
+                n_full = len(data) // sz
+                pending = data[n_full * sz:]
+                for pos in range(0, n_full * sz, sz):
+                    _, _, etype, code, value = struct.unpack_from(fmt, data, pos)
+                    if etype == EV_ABS:
+                        if code in (ABS_X, ABS_MT_POSITION_X):
+                            raw_x = value
+                        elif code in (ABS_Y, ABS_MT_POSITION_Y):
+                            raw_y = value
+                    elif etype == EV_KEY and code == BTN_TOUCH:
+                        if value == 1:
+                            down_x, down_y = raw_x, raw_y
+                            if raw_x is not None:
+                                sx, sy = rotate_touch(*map_touch(raw_x, raw_y))
+                                with touch_lock:
+                                    touch_events.append(("down", sx, sy))
+                            moved = False
+                        else:
+                            if raw_x is not None and raw_y is not None:
+                                sx, sy = map_touch(raw_x, raw_y)
+                                sx, sy = rotate_touch(sx, sy)
+                                with touch_lock:
+                                    touch_events.append(("up", sx, sy))
+                                    # a tap is a release that didn't drag far
+                                    if not moved:
+                                        touch_tap.append((sx, sy))
+                                        touch_raw.append((down_x if down_x else raw_x,
+                                                          down_y if down_y else raw_y))
+                                        del touch_tap[:-TOUCH_QUEUE_MAX]
+                                        del touch_raw[:-TOUCH_QUEUE_MAX]
+                                if debug:
+                                    kind = "drag" if moved else "tap"
+                                    print(f"TOUCH {kind} raw=({raw_x},{raw_y}) -> ({sx},{sy})")
+                            raw_x = raw_y = None
+                            down_x = down_y = None
+                    elif etype == EV_SYN:
+                        # emit motion while the finger is down
+                        if down_x is not None and raw_x is not None and raw_y is not None:
                             sx, sy = rotate_touch(*map_touch(raw_x, raw_y))
+                            dx0, dy0 = rotate_touch(*map_touch(down_x, down_y))
+                            if abs(sx - dx0) > 6 or abs(sy - dy0) > 6:
+                                moved = True
                             with touch_lock:
-                                touch_events.append(("down", sx, sy))
-                        moved = False
-                    else:
-                        if raw_x is not None and raw_y is not None:
-                            sx, sy = map_touch(raw_x, raw_y)
-                            sx, sy = rotate_touch(sx, sy)
-                            with touch_lock:
-                                touch_events.append(("up", sx, sy))
-                                # a tap is a release that didn't drag far
-                                if not moved:
-                                    touch_tap.append((sx, sy))
-                                    touch_raw.append((down_x if down_x else raw_x,
-                                                      down_y if down_y else raw_y))
-                            if debug:
-                                kind = "drag" if moved else "tap"
-                                print(f"TOUCH {kind} raw=({raw_x},{raw_y}) -> ({sx},{sy})")
-                        raw_x = raw_y = None
-                        down_x = down_y = None
-                elif etype == EV_SYN:
-                    # emit motion while the finger is down
-                    if down_x is not None and raw_x is not None and raw_y is not None:
-                        sx, sy = rotate_touch(*map_touch(raw_x, raw_y))
-                        dx0, dy0 = rotate_touch(*map_touch(down_x, down_y))
-                        if abs(sx - dx0) > 6 or abs(sy - dy0) > 6:
-                            moved = True
-                        with touch_lock:
-                            touch_events.append(("move", sx, sy))
+                                # collapse consecutive motion into the latest
+                                if touch_events and touch_events[-1][0] == "move":
+                                    touch_events[-1] = ("move", sx, sy)
+                                else:
+                                    touch_events.append(("move", sx, sy))
+                                del touch_events[:-TOUCH_QUEUE_MAX]
     except PermissionError:
         print("Touch: permission denied (run with sudo)")
     except Exception as e:
@@ -3532,9 +3942,9 @@ def main():
     pygame.font.init()
     load_rotation()
     load_region()
+    console.take()
     screen, fb = init_screen()
     fonts = make_fonts()
-    clock = pygame.time.Clock()
 
     if DEMO:
         threading.Thread(target=demo_feeder, daemon=True).start()
@@ -3552,9 +3962,11 @@ def main():
     threading.Thread(target=wifi_poller, daemon=True).start()
     threading.Thread(target=map_pan_watchdog, daemon=True).start()
 
-    flash = 0
     drag_from = None
     running = True
+    last_touch = 0.0          # when the UI was last poked, for frame pacing
+    render_s = 1.0 / FPS_NAV  # measured cost of a frame, seeded optimistically
+    next_draw = 0.0
 
     if CALIBRATE:
         cal_active = True
@@ -3594,6 +4006,8 @@ def main():
         # drag / pan on the map
         with touch_lock:
             evs = list(touch_events); touch_events.clear()
+        if evs:
+            last_touch = time.time()
         for (kind, ex, ey) in evs:
             r = MAP_RECT
             inside = r and (r[0] <= ex <= r[0] + r[2] and r[1] <= ey <= r[1] + r[3])
@@ -3615,6 +4029,8 @@ def main():
         # touch taps from evdev
         with touch_lock:
             taps = list(touch_tap); touch_tap.clear()
+        if taps:
+            last_touch = time.time()
         for (mx, my) in taps:
             def _hit(r):
                 return r and r[0] <= mx <= r[0] + r[2] and r[1] <= my <= r[1] + r[3]
@@ -3785,27 +4201,72 @@ def main():
                 settings_open = True
                 continue
 
+        # ── frame pacing ──────────────────────────────────────────────
+        # Input is drained every time round this loop; drawing only happens
+        # when a frame is actually due. That keeps taps responsive even when
+        # the map is expensive, and lets the redraw rate fall away to almost
+        # nothing when the bike is parked.
+        now = time.monotonic()
+        if now < next_draw:
+            time.sleep(min(0.015, next_draw - now))
+            continue
+
         with nav_lock:
             d = dict(nav)
-        flash = (flash + 1) % 28
+
+        if (time.time() - last_touch) < TOUCH_ACTIVE_S or any(
+                (settings_open, wifi_panel_open, bt_panel_open, kb_open,
+                 power_confirm, cal_active)):
+            target = FPS_TOUCH
+        elif d.get("lat") is not None and (d.get("instruction")
+                                           or d.get("speed_kph")):
+            target = FPS_NAV
+        else:
+            target = FPS_IDLE
+        # never let drawing take more than its share of the one core — the
+        # phone link, touch reader and tile streaming all need it too
+        target = max(1.0, min(target, RENDER_BUDGET / max(0.005, render_s)))
+
+        # flash animation is driven by the clock, not the frame counter, so
+        # it looks the same however fast we happen to be drawing
+        flash = int(time.time() * FPS_NAV) % 28
+
         want = frame_size()
         if screen.get_size() != want:
             screen = pygame.Surface(want)
+        t0 = time.monotonic()
         build_frame(screen, fonts, d, flash)
         fb.blit(screen)
-        clock.tick(FPS)
+        dt_frame = time.monotonic() - t0
+        render_s = render_s * 0.75 + dt_frame * 0.25      # smooth the estimate
+        next_draw = t0 + 1.0 / target
 
     fb.close()
     pygame.quit()
     print("MotoNav stopped.")
 
 
+def _shutdown(*_a):
+    """Hand the console back, whatever we are stopped by."""
+    console.release()
+    try:
+        pygame.quit()
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
+    # systemd stops us with SIGTERM; without this the VT would be left in
+    # graphics mode and the console would look dead until the next reboot
+    atexit.register(console.release)
+    for _sig in ("SIGTERM", "SIGHUP"):
+        try:
+            signal.signal(getattr(signal, _sig), lambda *_a: sys.exit(0))
+        except Exception:
+            pass
     try:
         main()
     except KeyboardInterrupt:
         print("\nInterrupted.")
-        try:
-            pygame.quit()
-        except Exception:
-            pass
+    finally:
+        _shutdown()

@@ -65,6 +65,12 @@ echo "[2/6] Installing to $APP_DIR ..."
 mkdir -p "$APP_DIR"
 cp "$SRC_DIR/motonav.py" "$APP_DIR/"
 chmod +x "$APP_DIR/motonav.py"
+# tilestore.py is not optional: without it `import tilestore` fails, the app
+# runs with no tile store at all, and the map panel draws an empty plate
+for f in tilestore.py pbfimport.py; do
+  if [[ -f "$SRC_DIR/$f" ]]; then cp "$SRC_DIR/$f" "$APP_DIR/"; fi
+done
+if [[ -d "$SRC_DIR/icons" ]]; then cp -r "$SRC_DIR/icons" "$APP_DIR/"; fi
 # keep any existing calibration / rotation settings
 for f in touch_cal.conf rotation.conf; do
   if [[ -f "$SRC_DIR/$f" && ! -f "$APP_DIR/$f" ]]; then cp "$SRC_DIR/$f" "$APP_DIR/"; fi
@@ -106,8 +112,12 @@ WorkingDirectory=/opt/motonav
 
 # let the SPI panel, touch device and network settle
 ExecStartPre=/bin/sleep 6
-# blank the console so no text shows behind us
-ExecStartPre=-/usr/bin/setterm --cursor off --blank 0 --powerdown 0
+# Blank the console so no text or cursor shows behind us. setterm acts on
+# its OWN stdout, which under systemd is the journal — so it has to be
+# redirected at /dev/tty0 explicitly or it silently does nothing. (The app
+# also does this itself; this just covers the gap before it starts.)
+ExecStartPre=-/bin/sh -c '/usr/bin/setterm --cursor off --blank 0 --powerdown 0 > /dev/tty0'
+ExecStartPre=-/bin/sh -c 'echo 0 > /sys/class/graphics/fbcon/cursor_blink'
 ExecStart=/usr/bin/python3 /opt/motonav/motonav.py
 
 Restart=always
