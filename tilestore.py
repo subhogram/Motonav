@@ -16,9 +16,14 @@ TILE FILE  (little-endian)
     magic     6s   b"MNTIL1"
     n_ways    u4
     per way:
-      cls     u1        1 motorway .. 7 service
+      cls     u1        1 motorway .. 7 service,
+                        8 water area, 9 waterway, 10 green area
       n_pts   u2
       pts     n_pts * (i4 lat_e6, i4 lon_e6)
+
+Classes 8 and 10 are closed rings (first point == last) and fill; everything
+else strokes. The class byte never used more than 1..7, so adding these is not
+a format change — an older build drops them at its own class test.
 
 Tiles are append-only: a second download covering the same cell adds its ways
 to the existing file, so gap-filling never rewrites what is already there.
@@ -51,9 +56,27 @@ MAX_LOADED = 12                 # tiles kept in RAM at once (Pi Zero W: 512 MB)
 M_PER_DEG = 111320.0
 SIMPLIFY_M = 2.0                # geometry tolerance applied when storing ways
 
+# Land cover, added on top of the original 1..7 road classes. The class field
+# is a byte and only ever used 1..7, so these need no format change: an older
+# build reading a newer tile drops them at its own `cls > max_cls` test, and a
+# newer build reading an older tile simply finds none.
+CLS_WATER = 8                   # lake / reservoir / basin — a closed ring
+CLS_WATERWAY = 9                # river / canal / stream — a line
+CLS_GREEN = 10                  # park / forest / grass / meadow — a closed ring
+
+AREA_CLASSES = frozenset((CLS_WATER, CLS_GREEN))
+LINE_CLASSES = frozenset((CLS_WATERWAY,))
+
+# A lake edge needs far less fidelity than a road centreline: at 1.3 m/px the
+# rider cannot tell a 6 m deviation in a shoreline from the real thing, and
+# every point dropped here is one the draw loop never projects.
+AREA_SIMPLIFY_M = 6.0
+AREA_MIN_SPAN_M = 25.0          # rings smaller than this are sub-pixel — drop them
+
 CLASS_STYLE = {
     1: (7, 9, True), 2: (6, 8, True), 3: (5, 7, True), 4: (4, 6, True),
     5: (3, 5, False), 6: (2, 4, False), 7: (2, 3, False),
+    CLS_WATERWAY: (2, 3, False),
 }
 
 _HEAD = struct.Struct("<BH")
@@ -173,14 +196,37 @@ def simplify(pts, eps_m=SIMPLIFY_M):
     return [pts[i] for i in range(n) if keep[i]]
 
 
+def way_span_m(pts):
+    """Rough size of a way: the diagonal of its bounding box, in metres."""
+    las = [p[0] for p in pts]
+    los = [p[1] for p in pts]
+    kx = M_PER_DEG * math.cos(math.radians(las[0]))
+    return math.hypot((max(las) - min(las)) * M_PER_DEG,
+                      (max(los) - min(los)) * kx)
+
+
 def encode_ways(ways, eps_m=SIMPLIFY_M):
-    """ways = [(cls, [(lat, lon), ...])] -> tile bytes (no header)."""
+    """
+    ways = [(cls, [(lat, lon), ...])] -> tile bytes (no header).
+
+    `eps_m` is the road tolerance; area classes use the coarser
+    AREA_SIMPLIFY_M instead, and rings too small to read on the panel are
+    dropped outright rather than stored for the draw loop to reject later.
+    """
     buf = bytearray()
     n = 0
     for cls, pts in ways:
         if len(pts) < 2:
             continue
-        pts = simplify(pts, eps_m)
+        if cls in AREA_CLASSES:
+            if way_span_m(pts) < AREA_MIN_SPAN_M:
+                continue
+            pts = simplify(pts, AREA_SIMPLIFY_M)
+            # a ring that collapses to a sliver fills as nothing — drop it
+            if len(pts) < 4:
+                continue
+        else:
+            pts = simplify(pts, eps_m)
         if len(pts) < 2 or len(pts) > 65535:
             continue
         buf += _HEAD.pack(cls, len(pts))
@@ -275,6 +321,18 @@ class TileStore:
         buckets = {}
         for cls, pts in ways:
             if len(pts) < 2:
+                continue
+            if cls in AREA_CLASSES:
+                # Areas go into every tile their bbox touches. Roads get away
+                # with first-point indexing because a road leaving the tile is
+                # still drawn from the neighbour's copy of it, but a forest
+                # whose first node sits in a cell the viewport never loads
+                # would simply vanish. There are orders of magnitude fewer
+                # areas than roads, so the duplication costs little.
+                las = [p[0] for p in pts]
+                los = [p[1] for p in pts]
+                for k in keys_for_bbox(min(las), min(los), max(las), max(los)):
+                    buckets.setdefault(k, []).append((cls, pts))
                 continue
             # a way belongs to every tile it crosses
             for (la, lo) in pts:

@@ -361,6 +361,14 @@ FPS_IDLE = 3              # parked, no route, nothing moving
 RENDER_BUDGET = 0.5       # never spend more than this share of the core drawing
 TOUCH_ACTIVE_S = 3.0      # treat the UI as "being used" this long after a touch
 
+# Points the map may project for lakes, parks and rivers in one frame. Filling
+# is C-speed; it is the per-point projection in Python that costs, so the cap
+# is on points rather than shapes. A normal viewport is nowhere near this —
+# it exists so a river delta or a national park degrades by dropping the
+# smallest shapes instead of blowing the frame, which RENDER_BUDGET can only
+# react to after the slow frame has already been paid for.
+AREA_POINT_BUDGET = 1500
+
 # ── Themes ────────────────────────────────────────────────────────────────────
 THEMES = {
     # GTA-style daytime map: pale parchment land, white roads, cyan route
@@ -377,6 +385,8 @@ THEMES = {
         "ROADFILL": (255, 255, 255),
         "ROUTEFAR": (96, 176, 224),
         "GHOSTROAD": (196, 194, 184),
+        "WATERFILL": (168, 202, 224), "WATERLINE": (150, 190, 216),
+        "GREENFILL": (196, 216, 178),
     },
     # GTA night map: dark slate land, cool grey roads, same cyan route
     "night": {
@@ -392,6 +402,8 @@ THEMES = {
         "ROADFILL": (78, 88, 104),
         "ROUTEFAR": (58, 140, 190),
         "GHOSTROAD": (58, 64, 76),
+        "WATERFILL": (30, 48, 68), "WATERLINE": (38, 60, 84),
+        "GREENFILL": (40, 56, 46),
     },
 }
 
@@ -885,7 +897,7 @@ def draw_map(surf, fonts, d, rect):
 
     minimal = (map_detail == "minimal")
 
-    # ── real OSM roads ──
+    # ── real OSM land cover and roads ──
     if have_map and lat is not None:
         # zoomed right out, minor streets are pixel mush — drop them rather
         # than pay to project and stroke points nobody can read
@@ -900,16 +912,58 @@ def draw_map(surf, fonts, d, rect):
         span_m = max(rw, rh) * MPP * (0.6 if minimal else 0.75)
         try:
             drawn = []
+            rings, waterways = [], []
+            # One pass over one ways_near() answer, split by class. Land cover
+            # is skipped entirely in minimal mode — being route-only is the
+            # whole point of it.
             for w in tiles.ways_near(lat, lon, radius_m=span_m):
-                if w[0] > max_cls:
-                    continue
                 # bounding-box reject: four comparisons instead of projecting
                 # every point of a way that cannot be on screen
                 if w[4] < vs or w[2] > vn or w[5] < vw or w[3] > ve:
                     continue
+                cls = w[0]
+                if cls in tilestore.AREA_CLASSES:
+                    if not minimal:
+                        rings.append(w)
+                    continue
+                if cls in tilestore.LINE_CLASSES:
+                    if not minimal:
+                        waterways.append(w)
+                    continue
+                if cls > max_cls:
+                    continue
                 scr = project(w[1])
                 if len(scr) >= 2:
-                    drawn.append((w[0], scr))
+                    drawn.append((cls, scr))
+
+            # Land cover goes down first so roads and the route sit on top of
+            # it. Biggest rings first: it is what the point budget wants, and
+            # it also gets the nesting right for free — a lake inside a park,
+            # or an island inside a lake, lands on top of what contains it.
+            if rings or waterways:
+                budget = AREA_POINT_BUDGET
+                rings.sort(key=lambda w: (w[4] - w[2]) * (w[5] - w[3]),
+                           reverse=True)
+                water, green = C["WATERFILL"], C["GREENFILL"]
+                for w in rings:
+                    if budget <= 0:
+                        break
+                    budget -= len(w[1])
+                    scr = project(w[1])
+                    if len(scr) >= 3:      # a fill needs a triangle at least
+                        pygame.draw.polygon(
+                            surf,
+                            water if w[0] == tilestore.CLS_WATER else green,
+                            scr)
+                line = C["WATERLINE"]
+                for w in waterways:
+                    if budget <= 0:
+                        break
+                    budget -= len(w[1])
+                    scr = project(w[1])
+                    if len(scr) >= 2:
+                        pygame.draw.lines(surf, line, False, scr, 3)
+
             if minimal:
                 ghost = C["GHOSTROAD"]
                 for _cls, scr in drawn:
@@ -2407,10 +2461,10 @@ def save_region_bytes(blob):
                                    for i in range(0, len(v), 2)]))
             off += need
         touched = tiles.store_ways(ways)
-        print(f"Maps: +{len(ways)} roads into {len(touched)} tiles "
+        print(f"Maps: +{len(ways)} ways into {len(touched)} tiles "
               f"({len(blob)//1024} KB)")
         with nav_lock:
-            nav["region_msg"] = f"+{len(ways)} roads"
+            nav["region_msg"] = f"+{len(ways)} ways"
         return True
     except Exception as e:
         print(f"Maps: append failed {e}")
