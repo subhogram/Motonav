@@ -426,6 +426,8 @@ MAP_RECT = None                # last drawn map rect (for hit testing)
 MAP_BTN_ZIN = None
 MAP_BTN_ZOUT = None
 MAP_BTN_RECENTER = None
+map_fullscreen = False         # True: map fills the screen above the bottom bar
+MAP_BTN_FULLSCREEN = None      # hit rect for the fullscreen/collapse toggle
 pan_lock = threading.Lock()
 
 
@@ -1153,14 +1155,31 @@ def draw_map(surf, fonts, d, rect):
         MAP_BTN_RECENTER = None
         text(surf, "N", f_lbl, C["MUTED"], rx + rw - 13, ry + 6, "center")
 
-    # Speed badge, bottom-left inside the map
-    spd = d.get("speed_kph")
-    if spd is not None:
-        bw, bh = 62, 18
-        bx, by_ = rx + 6, ry + rh - bh - 6
-        pygame.draw.rect(surf, C["PANEL"], (bx, by_, bw, bh), border_radius=3)
-        pygame.draw.rect(surf, C["MAPEDGE"], (bx, by_, bw, bh), 1, border_radius=3)
-        text(surf, f"{int(round(spd))} km/h", f_lbl, C["TEXT"], bx + bw // 2, by_ + 4, "center")
+    # Fullscreen / collapse toggle, bottom-left inside the map
+    global MAP_BTN_FULLSCREEN
+    bs2 = 22
+    MAP_BTN_FULLSCREEN = (rx + 5, ry + rh - bs2 - 5, bs2, bs2)
+    pygame.draw.rect(surf, C["PANEL"], MAP_BTN_FULLSCREEN, border_radius=3)
+    pygame.draw.rect(surf, C["MAPEDGE"], MAP_BTN_FULLSCREEN, 1, border_radius=3)
+
+    def _fs_glyph():
+        fx, fy, fw, fh = MAP_BTN_FULLSCREEN
+        pad, arm = 5, 4
+        if map_fullscreen:
+            # collapse: arrows pointing inward toward the corners
+            corners = [(fx + pad + arm, fy + pad, fx + pad, fy + pad, fx + pad, fy + pad + arm),
+                       (fx + fw - pad - arm, fy + pad, fx + fw - pad, fy + pad, fx + fw - pad, fy + pad + arm),
+                       (fx + pad + arm, fy + fh - pad, fx + pad, fy + fh - pad, fx + pad, fy + fh - pad - arm),
+                       (fx + fw - pad - arm, fy + fh - pad, fx + fw - pad, fy + fh - pad, fx + fw - pad, fy + fh - pad - arm)]
+        else:
+            # expand: arrows pointing outward toward the corners
+            corners = [(fx + pad, fy + pad + arm, fx + pad, fy + pad, fx + pad + arm, fy + pad),
+                       (fx + fw - pad, fy + pad + arm, fx + fw - pad, fy + pad, fx + fw - pad - arm, fy + pad),
+                       (fx + pad, fy + fh - pad - arm, fx + pad, fy + fh - pad, fx + pad + arm, fy + fh - pad),
+                       (fx + fw - pad, fy + fh - pad - arm, fx + fw - pad, fy + fh - pad, fx + fw - pad - arm, fy + fh - pad)]
+        for x1, y1, x2, y2, x3, y3 in corners:
+            pygame.draw.lines(surf, C["TEXT"], False, [(x1, y1), (x2, y2), (x3, y3)], 2)
+    blit_icon(surf, "collapse" if map_fullscreen else "fullscreen", MAP_BTN_FULLSCREEN, _fs_glyph)
 
 
 def build_frame(screen, fonts, d, flash):
@@ -1182,152 +1201,161 @@ def build_frame(screen, fonts, d, flash):
 
     screen.fill(C["BG"])
 
-    # ── top bar ──
-    pygame.draw.rect(screen, C["PANEL"], (0, 0, W, TOP))
-    pygame.draw.line(screen, C["BORDER"], (0, TOP), (W, TOP), 1)
-    text(screen, "MOTONAV", f_lbl, C["ROUTE"], 10, int(8 * sc))
+    if not map_fullscreen:
+        # ── top bar ──
+        pygame.draw.rect(screen, C["PANEL"], (0, 0, W, TOP))
+        pygame.draw.line(screen, C["BORDER"], (0, TOP), (W, TOP), 1)
+        text(screen, "MOTONAV", f_lbl, C["ROUTE"], 10, int(8 * sc))
 
-    linked = d["connected"]
-    with transport_lock:
-        tname = active_transport
-    lc = C["GREEN"] if linked else C["WARN"]
-    pygame.draw.circle(screen, lc, (W // 2 - 78, TOP // 2), 4)
-    label = tname if (linked and tname) else ("PHONE" if linked else "NO LINK")
-    text(screen, label, f_lbl, lc, W // 2 - 70, int(8 * sc))
+        linked = d["connected"]
+        with transport_lock:
+            tname = active_transport
+        lc = C["GREEN"] if linked else C["WARN"]
+        pygame.draw.circle(screen, lc, (W // 2 - 78, TOP // 2), 4)
+        label = tname if (linked and tname) else ("PHONE" if linked else "NO LINK")
+        text(screen, label, f_lbl, lc, W // 2 - 70, int(8 * sc))
 
-    # ── settings gear chip + power chip (right side) ──
-    global PWR_CHIP, SET_CHIP
-    pw_w, chip_h = int(30 * sc), TOP - int(7 * sc)
-    pw_x, chip_y = W - pw_w - 6, int(4 * sc)
-    PWR_CHIP = (pw_x, chip_y, pw_w, chip_h)
-    pygame.draw.rect(screen, C["PANEL2"], PWR_CHIP, border_radius=3)
-    pygame.draw.rect(screen, C["RED"], PWR_CHIP, 1, border_radius=3)
+        # ── settings gear chip + power chip (right side) ──
+        global PWR_CHIP, SET_CHIP
+        pw_w, chip_h = int(30 * sc), TOP - int(7 * sc)
+        pw_x, chip_y = W - pw_w - 6, int(4 * sc)
+        PWR_CHIP = (pw_x, chip_y, pw_w, chip_h)
+        pygame.draw.rect(screen, C["PANEL2"], PWR_CHIP, border_radius=3)
+        pygame.draw.rect(screen, C["RED"], PWR_CHIP, 1, border_radius=3)
 
-    def _pwr_glyph():
-        gcx, gcy = pw_x + pw_w // 2, chip_y + chip_h // 2
-        rr_ = int(5 * sc)
-        pygame.draw.arc(screen, C["RED"], (gcx - rr_, gcy - rr_, rr_ * 2, rr_ * 2),
-                        math.radians(-60), math.radians(240), 2)
-        pygame.draw.line(screen, C["RED"], (gcx, gcy - rr_ - 1), (gcx, gcy), 2)
-    blit_icon(screen, "power", PWR_CHIP, _pwr_glyph)
+        def _pwr_glyph():
+            gcx, gcy = pw_x + pw_w // 2, chip_y + chip_h // 2
+            rr_ = int(5 * sc)
+            pygame.draw.arc(screen, C["RED"], (gcx - rr_, gcy - rr_, rr_ * 2, rr_ * 2),
+                            math.radians(-60), math.radians(240), 2)
+            pygame.draw.line(screen, C["RED"], (gcx, gcy - rr_ - 1), (gcx, gcy), 2)
+        blit_icon(screen, "power", PWR_CHIP, _pwr_glyph)
 
-    # rotate chip
-    global ROT_CHIP
-    rot_w = int(30 * sc)
-    rot_x = pw_x - rot_w - int(5 * sc)
-    ROT_CHIP = (rot_x, chip_y, rot_w, chip_h)
-    pygame.draw.rect(screen, C["PANEL2"], ROT_CHIP, border_radius=3)
-    pygame.draw.rect(screen, C["BORDER"], ROT_CHIP, 1, border_radius=3)
+        # rotate chip
+        global ROT_CHIP
+        rot_w = int(30 * sc)
+        rot_x = pw_x - rot_w - int(5 * sc)
+        ROT_CHIP = (rot_x, chip_y, rot_w, chip_h)
+        pygame.draw.rect(screen, C["PANEL2"], ROT_CHIP, border_radius=3)
+        pygame.draw.rect(screen, C["BORDER"], ROT_CHIP, 1, border_radius=3)
 
-    def _rot_glyph():
-        rcx, rcy = rot_x + rot_w // 2, chip_y + chip_h // 2
-        rad = int(5 * sc)
-        pygame.draw.arc(screen, C["MUTED"], (rcx - rad, rcy - rad, rad * 2, rad * 2),
-                        math.radians(40), math.radians(320), 2)
-        pygame.draw.polygon(screen, C["MUTED"], [
-            (rcx + rad, rcy - rad + 1), (rcx + rad - 4, rcy - rad - 2),
-            (rcx + rad + 2, rcy - rad - 3)])
-    blit_icon(screen, "rotate", ROT_CHIP, _rot_glyph)
+        def _rot_glyph():
+            rcx, rcy = rot_x + rot_w // 2, chip_y + chip_h // 2
+            rad = int(5 * sc)
+            pygame.draw.arc(screen, C["MUTED"], (rcx - rad, rcy - rad, rad * 2, rad * 2),
+                            math.radians(40), math.radians(320), 2)
+            pygame.draw.polygon(screen, C["MUTED"], [
+                (rcx + rad, rcy - rad + 1), (rcx + rad - 4, rcy - rad - 2),
+                (rcx + rad + 2, rcy - rad - 3)])
+        blit_icon(screen, "rotate", ROT_CHIP, _rot_glyph)
 
-    set_w = int(30 * sc)
-    set_x = rot_x - set_w - int(5 * sc)
-    SET_CHIP = (set_x, chip_y, set_w, chip_h)
-    pygame.draw.rect(screen, C["PANEL2"], SET_CHIP, border_radius=3)
-    pygame.draw.rect(screen, C["BORDER"], SET_CHIP, 1, border_radius=3)
+        set_w = int(30 * sc)
+        set_x = rot_x - set_w - int(5 * sc)
+        SET_CHIP = (set_x, chip_y, set_w, chip_h)
+        pygame.draw.rect(screen, C["PANEL2"], SET_CHIP, border_radius=3)
+        pygame.draw.rect(screen, C["BORDER"], SET_CHIP, 1, border_radius=3)
 
-    def _gear_glyph():
-        scx, scy = set_x + set_w // 2, chip_y + chip_h // 2
-        gr = int(4.5 * sc)
-        pygame.draw.circle(screen, C["MUTED"], (scx, scy), gr, 2)
-        for ang in range(0, 360, 60):
-            a = math.radians(ang)
-            pygame.draw.line(screen, C["MUTED"],
-                (scx + int(math.cos(a) * (gr + 1)), scy + int(math.sin(a) * (gr + 1))),
-                (scx + int(math.cos(a) * (gr + 4)), scy + int(math.sin(a) * (gr + 4))), 2)
-    blit_icon(screen, "settings", SET_CHIP, _gear_glyph)
+        def _gear_glyph():
+            scx, scy = set_x + set_w // 2, chip_y + chip_h // 2
+            gr = int(4.5 * sc)
+            pygame.draw.circle(screen, C["MUTED"], (scx, scy), gr, 2)
+            for ang in range(0, 360, 60):
+                a = math.radians(ang)
+                pygame.draw.line(screen, C["MUTED"],
+                    (scx + int(math.cos(a) * (gr + 1)), scy + int(math.sin(a) * (gr + 1))),
+                    (scx + int(math.cos(a) * (gr + 4)), scy + int(math.sin(a) * (gr + 4))), 2)
+        blit_icon(screen, "settings", SET_CHIP, _gear_glyph)
 
-    # wifi status text (informational only now)
-    with wifi_lock:
-        w_ssid = wifi_state["ssid"]
-        w_sig = wifi_state["signal"]
-    if w_ssid:
-        text(screen, f"{signal_bars(w_sig)} {w_ssid[:10]}", f_lbl, C["GREEN"],
-             set_x - int(8 * sc), int(8 * sc), "right")
+        # wifi status text (informational only now)
+        with wifi_lock:
+            w_ssid = wifi_state["ssid"]
+            w_sig = wifi_state["signal"]
+        if w_ssid:
+            text(screen, f"{signal_bars(w_sig)} {w_ssid[:10]}", f_lbl, C["GREEN"],
+                 set_x - int(8 * sc), int(8 * sc), "right")
+        else:
+            text(screen, "wifi off", f_lbl, C["MUTED"], set_x - int(8 * sc), int(8 * sc), "right")
+
+        # ── left: arrow + distance + instruction ──
+        pygame.draw.rect(screen, C["PANEL2"], (0, TOP, SPX, MID))
+        pygame.draw.line(screen, C["BORDER"], (SPX, TOP), (SPX, TOP + MID), 1)
+        # GTA route-blue accent bar
+        pygame.draw.rect(screen, C["ROUTE"], (0, TOP + 6, 4, MID - 12))
+
+        arrow_h = int(MID * 0.42)
+        acx, acy = SPX // 2, TOP + arrow_h // 2 + int(4 * sc)
+        asz = int(min(SPX, arrow_h) * 0.78)
+
+        if d["arrived"]:
+            draw_icon(screen, "destination", acx, acy, asz,
+                      C["GREEN"] if flash < 18 else C["PANEL2"])
+        elif not d["instruction"]:
+            for i in range(12):
+                a = math.radians(i * 30 + flash * 6)
+                dim = tuple(int(v * (0.8 if i % 2 == 0 else 0.25)) for v in C["MUTED"])
+                sx = acx + int(math.cos(a) * asz * .38); sy = acy + int(math.sin(a) * asz * .38)
+                ex = acx + int(math.cos(a + .45) * asz * .38); ey = acy + int(math.sin(a + .45) * asz * .38)
+                pygame.draw.line(screen, dim, (sx, sy), (ex, ey), 2)
+        else:
+            draw_icon(screen, d["maneuver"], acx, acy, asz, ac)
+
+        info_y = TOP + arrow_h + int(2 * sc)
+        if d["arrived"]:
+            text(screen, "ARRIVED", f_med, C["GREEN"], SPX // 2, info_y + int(6 * sc), "center")
+            text(screen, "DESTINATION REACHED", f_lbl, C["MUTED"], SPX // 2, info_y + int(32 * sc), "center")
+        elif not d["instruction"]:
+            text(screen, "WAITING FOR NAV", f_sm, C["MUTED"], SPX // 2, info_y + int(12 * sc), "center")
+        else:
+            dv, du = fmt_distance(d["distance_m"])
+            dw = f_big.size(dv)[0]
+            uw = f_unit.size(du)[0]
+            dx0 = SPX // 2 - (dw + uw + 6) // 2
+            text(screen, dv, f_big, C["TEXT"], dx0, info_y)
+            text(screen, du.lower(), f_unit, C["MUTED"], dx0 + dw + 6, info_y + int(14 * sc))
+
+            iy = info_y + f_big.get_height() + int(2 * sc)
+            instr = d["instruction"].upper()
+            cw = SPX - 20
+            l1 = l2 = ""
+            for w in instr.split():
+                t = (l1 + " " + w).strip()
+                if f_sm.size(t)[0] <= cw:
+                    l1 = t
+                else:
+                    l2 = (l2 + " " + w).strip()
+            text(screen, l1, f_sm, C["TEXT"], SPX // 2, iy, "center", max_w=cw)
+            if l2:
+                text(screen, l2, f_lbl, C["MUTED"], SPX // 2,
+                     iy + f_sm.get_height() + int(2 * sc), "center", max_w=cw)
+
+    # ── right: GTA minimap (inset with margin; full screen above the bottom
+    # bar when map_fullscreen is on) ──
+    if map_fullscreen:
+        draw_map(screen, fonts, d, (0, 0, W, H - BOT))
     else:
-        text(screen, "wifi off", f_lbl, C["MUTED"], set_x - int(8 * sc), int(8 * sc), "right")
+        m = int(7 * sc)
+        draw_map(screen, fonts, d, (SPX + m, TOP + m, W - SPX - m * 2, MID - m * 2))
 
-    # ── left: arrow + distance + instruction ──
-    pygame.draw.rect(screen, C["PANEL2"], (0, TOP, SPX, MID))
-    pygame.draw.line(screen, C["BORDER"], (SPX, TOP), (SPX, TOP + MID), 1)
-    # GTA route-blue accent bar
-    pygame.draw.rect(screen, C["ROUTE"], (0, TOP + 6, 4, MID - 12))
-
-    arrow_h = int(MID * 0.42)
-    acx, acy = SPX // 2, TOP + arrow_h // 2 + int(4 * sc)
-    asz = int(min(SPX, arrow_h) * 0.78)
-
-    if d["arrived"]:
-        draw_icon(screen, "destination", acx, acy, asz,
-                  C["GREEN"] if flash < 18 else C["PANEL2"])
-    elif not d["instruction"]:
-        for i in range(12):
-            a = math.radians(i * 30 + flash * 6)
-            dim = tuple(int(v * (0.8 if i % 2 == 0 else 0.25)) for v in C["MUTED"])
-            sx = acx + int(math.cos(a) * asz * .38); sy = acy + int(math.sin(a) * asz * .38)
-            ex = acx + int(math.cos(a + .45) * asz * .38); ey = acy + int(math.sin(a + .45) * asz * .38)
-            pygame.draw.line(screen, dim, (sx, sy), (ex, ey), 2)
-    else:
-        draw_icon(screen, d["maneuver"], acx, acy, asz, ac)
-
-    info_y = TOP + arrow_h + int(2 * sc)
-    if d["arrived"]:
-        text(screen, "ARRIVED", f_med, C["GREEN"], SPX // 2, info_y + int(6 * sc), "center")
-        text(screen, "DESTINATION REACHED", f_lbl, C["MUTED"], SPX // 2, info_y + int(32 * sc), "center")
-    elif not d["instruction"]:
-        text(screen, "WAITING FOR NAV", f_sm, C["MUTED"], SPX // 2, info_y + int(12 * sc), "center")        
-    else:
-        dv, du = fmt_distance(d["distance_m"])
-        dw = f_big.size(dv)[0]
-        uw = f_unit.size(du)[0]
-        dx0 = SPX // 2 - (dw + uw + 6) // 2
-        text(screen, dv, f_big, C["TEXT"], dx0, info_y)
-        text(screen, du.lower(), f_unit, C["MUTED"], dx0 + dw + 6, info_y + int(14 * sc))
-
-        iy = info_y + f_big.get_height() + int(2 * sc)
-        instr = d["instruction"].upper()
-        cw = SPX - 20
-        l1 = l2 = ""
-        for w in instr.split():
-            t = (l1 + " " + w).strip()
-            if f_sm.size(t)[0] <= cw:
-                l1 = t
-            else:
-                l2 = (l2 + " " + w).strip()
-        text(screen, l1, f_sm, C["TEXT"], SPX // 2, iy, "center", max_w=cw)
-        if l2:
-            text(screen, l2, f_lbl, C["MUTED"], SPX // 2,
-                 iy + f_sm.get_height() + int(2 * sc), "center", max_w=cw)
-
-    # ── right: GTA minimap (inset with margin) ──
-    m = int(7 * sc)
-    draw_map(screen, fonts, d, (SPX + m, TOP + m, W - SPX - m * 2, MID - m * 2))
-
-    # ── bottom bar ──
+    # ── bottom bar: ETA | SPEED | REMAIN | TIME ──
     by = TOP + MID
     pygame.draw.rect(screen, C["PANEL"], (0, by, W, BOT))
     pygame.draw.line(screen, C["BORDER"], (0, by), (W, by), 1)
-    tw = W // 3
-    for i in (1, 2):
+    tw = W // 4
+    for i in (1, 2, 3):
         pygame.draw.line(screen, C["BORDER"], (tw * i, by + 7), (tw * i, by + BOT - 7), 1)
     ty = by + int(5 * sc)
     vy = ty + int(12 * sc)
     text(screen, "ETA", f_lbl, C["MUTED"], tw // 2, ty, "center")
     text(screen, fmt_eta(d["eta_seconds"]), f_tile, C["ROUTE"], tw // 2, vy, "center")
-    text(screen, "REMAIN", f_lbl, C["MUTED"], tw + tw // 2, ty, "center")
-    text(screen, fmt_duration(d["duration_s"]).lower(), f_tile, C["TEXT"], tw + tw // 2, vy, "center")
-    text(screen, "TIME", f_lbl, C["MUTED"], tw * 2 + tw // 2, ty, "center")
+    spd = d.get("speed_kph")
+    text(screen, "SPEED", f_lbl, C["MUTED"], tw + tw // 2, ty, "center")
+    text(screen, f"{int(round(spd))}" if spd is not None else "--", f_tile, C["TEXT"],
+         tw + tw // 2, vy, "center")
+    text(screen, "REMAIN", f_lbl, C["MUTED"], tw * 2 + tw // 2, ty, "center")
+    text(screen, fmt_duration(d["duration_s"]).lower(), f_tile, C["TEXT"], tw * 2 + tw // 2, vy, "center")
+    text(screen, "TIME", f_lbl, C["MUTED"], tw * 3 + tw // 2, ty, "center")
     text(screen, now_dt().strftime("%H:%M"), f_tile, C["TEXT"],
-         tw * 2 + tw // 2, vy, "center")
+         tw * 3 + tw // 2, vy, "center")
 
     # ── WiFi overlay panel ──
     if wifi_panel_open:
@@ -3982,6 +4010,7 @@ def main():
     global theme_mode, wifi_panel_open
     global kb_open, kb_target_ssid, kb_buffer, kb_shift, kb_page, KB_SHOW
     global power_confirm, settings_open, cal_active, cal_step, bt_panel_open
+    global map_fullscreen
     print("=" * 46)
     print("  MotoNav — starting")
     print(f"  Framebuffer : {FB_DEV}")
@@ -4044,6 +4073,8 @@ def main():
                 wifi_panel_open = not wifi_panel_open
                 if wifi_panel_open:
                     wifi_worker("refresh")
+            elif ev.type == pygame.KEYDOWN and ev.key == pygame.K_f:
+                map_fullscreen = not map_fullscreen
             elif ev.type in (pygame.MOUSEBUTTONDOWN, pygame.FINGERDOWN):
                 if ev.type == pygame.FINGERDOWN:
                     mx, my = int(ev.x * SCREEN_W), int(ev.y * SCREEN_H)
@@ -4242,6 +4273,9 @@ def main():
                 continue
             if MAP_BTN_RECENTER and _hit(MAP_BTN_RECENTER):
                 map_recenter()
+                continue
+            if _hit(MAP_BTN_FULLSCREEN):
+                map_fullscreen = not map_fullscreen
                 continue
 
             if _hit(ROT_CHIP):
