@@ -16,8 +16,9 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Downloads OSM road geometry for a region from the free Overpass API,
- * converts it to MotoNav's compact .mnosm format, and streams it to the Pi.
+ * Downloads OSM geometry for a region — roads plus lakes, parks and rivers —
+ * from the free Overpass API, converts it to MotoNav's compact .mnosm format,
+ * and streams it to the Pi.
  *
  * No API key. No Google. Overpass is a public OSM service.
  */
@@ -63,7 +64,8 @@ public class RegionDownloader {
         double perKm2 = (d == Detail.FULL)   ? 0.020     // dense urban streets
                       : (d == Detail.NORMAL) ? 0.0020
                                              : 0.00003;  // trunk network only
-        return Math.max(0.05, areaKm2 * perKm2);
+        // lakes, parks and rivers ride along with every query now
+        return Math.max(0.05, areaKm2 * perKm2 * 1.25);
     }
 
     private static final String HIGHWAYS =
@@ -75,17 +77,80 @@ public class RegionDownloader {
         void onDone(boolean ok, String msg);
     }
 
-    private static int classOf(String hw) {
-        if (hw == null) return 7;
-        if (hw.startsWith("motorway")) return 1;
-        if (hw.startsWith("trunk")) return 2;
-        if (hw.startsWith("primary")) return 3;
-        if (hw.startsWith("secondary")) return 4;
-        if (hw.startsWith("tertiary")) return 5;
-        if (hw.equals("residential") || hw.equals("living_street")) return 6;
+    // Land cover classes, matching tilestore.py. Classes 1..7 stay roads; 8
+    // and 10 are closed rings the Pi fills, 9 is a line it strokes.
+    static final int CLS_WATER    = 8;
+    static final int CLS_WATERWAY = 9;
+    static final int CLS_GREEN    = 10;
+
+    // Written as Overpass alternations because that is what the query needs;
+    // the matching sets below are derived from them once, so the two can
+    // never drift apart.
+    private static final String GREEN_LANDUSE =
+        "forest|grass|meadow|village_green|recreation_ground";
+    private static final String WATER_LANDUSE = "reservoir|basin";
+    private static final String GREEN_LEISURE =
+        "park|garden|nature_reserve|golf_course";
+    private static final String WATERWAYS = "river|canal|stream";
+
+    private static final java.util.Set<String> GREEN_LANDUSE_SET = setOf(GREEN_LANDUSE);
+    private static final java.util.Set<String> WATER_LANDUSE_SET = setOf(WATER_LANDUSE);
+    private static final java.util.Set<String> GREEN_LEISURE_SET = setOf(GREEN_LEISURE);
+    private static final java.util.Set<String> WATERWAYS_SET = setOf(WATERWAYS);
+
+    private static java.util.Set<String> setOf(String alternation) {
+        return new java.util.HashSet<>(java.util.Arrays.asList(alternation.split("\\|")));
+    }
+
+    /**
+     * Tags of one Overpass way -> tile class.
+     *
+     * Roads win over land cover: a bridge is tagged with both highway and
+     * waterway, and it is a road. Mirrors class_of_tags() in pbfimport.py —
+     * change the two together.
+     */
+    private static int classOf(JSONObject tags) {
+        if (tags == null) return 7;
+        String hw = tags.optString("highway", null);
+        if (hw != null && !hw.isEmpty()) {
+            if (hw.startsWith("motorway")) return 1;
+            if (hw.startsWith("trunk")) return 2;
+            if (hw.startsWith("primary")) return 3;
+            if (hw.startsWith("secondary")) return 4;
+            if (hw.startsWith("tertiary")) return 5;
+            if (hw.equals("residential") || hw.equals("living_street")) return 6;
+            return 7;
+        }
+        if ("water".equals(tags.optString("natural", null))) return CLS_WATER;
+        String landuse = tags.optString("landuse", "");
+        if (WATER_LANDUSE_SET.contains(landuse)) return CLS_WATER;
+        if (WATERWAYS_SET.contains(tags.optString("waterway", ""))) return CLS_WATERWAY;
+        if (GREEN_LANDUSE_SET.contains(landuse)
+            || GREEN_LEISURE_SET.contains(tags.optString("leisure", ""))) return CLS_GREEN;
         return 7;
     }
 
+    /**
+     * The Overpass query, built once for every call site.
+     *
+     * `area` is the selector clause the caller wants — an "around:" polyline
+     * or a bbox — and is spliced into every member of the union unchanged.
+     */
+    private static String queryFor(Detail detail, String area) {
+        return queryFor(detail.filter, area);
+    }
+
+    private static String queryFor(String highways, String area) {
+        return "[out:json][timeout:180];"
+            + "("
+            + "way[\"highway\"~\"^(" + highways + ")$\"](" + area + ");"
+            + "way[\"natural\"=\"water\"](" + area + ");"
+            + "way[\"landuse\"~\"^(" + WATER_LANDUSE + "|" + GREEN_LANDUSE + ")$\"](" + area + ");"
+            + "way[\"leisure\"~\"^(" + GREEN_LEISURE + ")$\"](" + area + ");"
+            + "way[\"waterway\"~\"^(" + WATERWAYS + ")$\"](" + area + ");"
+            + ");"
+            + "out geom;";
+    }
 
     /**
      * Download only a corridor around a planned route — typically a few MB
@@ -138,10 +203,7 @@ public class RegionDownloader {
                     }
 
                     cb.onStatus("Corridor " + (ci + 1) + "/" + chunks + " — requesting…");
-                    String q = "[out:json][timeout:180];"
-                        + "way[\"highway\"~\"^(" + detail.filter + ")$\"]"
-                        + "(around:" + radiusM + "," + line + ");"
-                        + "out geom;";
+                    String q = queryFor(detail, "around:" + radiusM + "," + line);
 
                     String json = null;
                     for (String ep : ENDPOINTS) {
@@ -241,10 +303,7 @@ public class RegionDownloader {
                             (tileNo - 1) / (double) total,
                             "area " + tileNo + " of " + total);
 
-                        String q = "[out:json][timeout:180];"
-                            + "way[\"highway\"~\"^(" + detail.filter + ")$\"]"
-                            + "(" + s0 + "," + w0 + "," + n0 + "," + e0 + ");"
-                            + "out geom;";
+                        String q = queryFor(detail, s0 + "," + w0 + "," + n0 + "," + e0);
                         final int currentTile = tileNo;
                         String json = null;
                         for (String ep : ENDPOINTS) {
@@ -332,7 +391,7 @@ public class RegionDownloader {
             JSONArray geom = el.optJSONArray("geometry");
             if (geom == null || geom.length() < 2) continue;
             JSONObject tags = el.optJSONObject("tags");
-            int cls = classOf(tags == null ? null : tags.optString("highway", null));
+            int cls = classOf(tags);
 
             List<double[]> pts = new ArrayList<>();
             double plat = 0, plon = 0;
@@ -415,10 +474,7 @@ public class RegionDownloader {
                         double e0 = west + (east - west) * (c + 1) / cols;
 
                         cb.onStatus("Tile " + idx + "/" + tiles + " — requesting…");
-                        String q = "[out:json][timeout:180];"
-                            + "way[\"highway\"~\"^(" + detail.filter + ")$\"]"
-                            + "(" + s0 + "," + w0 + "," + n0 + "," + e0 + ");"
-                            + "out geom;";
+                        String q = queryFor(detail, s0 + "," + w0 + "," + n0 + "," + e0);
 
                         String json = null;
                         for (String ep : ENDPOINTS) {
@@ -474,10 +530,7 @@ public class RegionDownloader {
                 double south = lat - dLat, north = lat + dLat;
                 double west = lon - dLon, east = lon + dLon;
 
-                String q = "[out:json][timeout:180];"
-                    + "way[\"highway\"~\"^(" + HIGHWAYS + ")$\"]"
-                    + "(" + south + "," + west + "," + north + "," + east + ");"
-                    + "out geom;";
+                String q = queryFor(HIGHWAYS, south + "," + west + "," + north + "," + east);
 
                 String json = null;
                 for (String ep : ENDPOINTS) {
@@ -558,7 +611,7 @@ public class RegionDownloader {
             if (geom == null || geom.length() < 2) continue;
 
             JSONObject tags = el.optJSONObject("tags");
-            int cls = classOf(tags == null ? null : tags.optString("highway", null));
+            int cls = classOf(tags);
 
             // simplify: drop points closer than ~8 m apart
             List<double[]> pts = new ArrayList<>();

@@ -7,13 +7,19 @@ Get an extract from  https://download.openstreetmap.fr/extracts/
 
     python3 pbfimport.py karnataka.osm.pbf
 
-It streams the file, keeps only roads, and writes them into maps/ as tiles.
+It streams the file, keeps roads plus lakes, parks and rivers, and writes
+them into maps/ as tiles.
 Nothing is held in RAM beyond one block at a time, so it runs on a Zero W —
 slowly, but it only has to happen once per extract.
 
     --highways major|normal|full    how much road detail to keep (default normal)
+    --no-areas                      roads only: skip lakes, parks and rivers
     --bbox S,W,N,E                  only import inside this box
     --out DIR                       tile directory (default ./maps)
+
+Land cover comes from ways only, so lakes and forests mapped as multipolygon
+relations are missed. Ordinary closed-way lakes, parks and rivers — nearly
+everything that reads on a 480x320 panel — come through.
 
 DEPENDENCIES
     pip3 install protobuf   (only needed for the import, not for navigating)
@@ -25,6 +31,10 @@ import struct
 import sys
 import time
 import zlib
+
+# tilestore lives next to this script; make that true however it was invoked
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import tilestore
 
 # ── road filtering ────────────────────────────────────────────────────────
 CLASS_OF = {
@@ -42,6 +52,44 @@ LEVELS = {
     "normal": {1, 2, 3, 4, 5},
     "full":   {1, 2, 3, 4, 5, 6, 7},
 }
+
+# ── land cover ────────────────────────────────────────────────────────────
+# Lakes, parks and rivers, which give the map some sense of place for very
+# little drawing cost. The detail levels above gate roads only; land cover is
+# either on or off (--no-areas).
+WATER_LANDUSE = {"reservoir", "basin"}
+GREEN_LANDUSE = {"forest", "grass", "meadow", "village_green",
+                 "recreation_ground"}
+GREEN_LEISURE = {"park", "garden", "nature_reserve", "golf_course"}
+WATERWAY_KINDS = {"river", "canal", "stream"}
+
+# the only tag keys worth decoding out of a way — everything else is skipped
+TAG_KEYS = frozenset(("highway", "natural", "landuse", "leisure", "waterway"))
+
+
+def class_of_tags(tags, keep, areas=True):
+    """
+    OSM tags -> tile class, or None to skip the way.
+
+    `tags` is a plain dict of the way's tags. Roads win over land cover: a
+    road bridging a river is a road, and it is tagged both ways.
+    """
+    hw = tags.get("highway")
+    if hw:
+        cls = CLASS_OF.get(hw)
+        return cls if cls in keep else None
+    if not areas:
+        return None
+    if tags.get("natural") == "water":
+        return tilestore.CLS_WATER
+    landuse = tags.get("landuse")
+    if landuse in WATER_LANDUSE:
+        return tilestore.CLS_WATER
+    if tags.get("waterway") in WATERWAY_KINDS:
+        return tilestore.CLS_WATERWAY
+    if landuse in GREEN_LANDUSE or tags.get("leisure") in GREEN_LEISURE:
+        return tilestore.CLS_GREEN
+    return None
 
 
 # ── minimal PBF reader (no external OSM library needed) ───────────────────
@@ -120,11 +168,9 @@ def blocks(path):
                 yield btype, raw
 
 
-def import_pbf(path, out_dir, level="normal", bbox=None, progress=None):
+def import_pbf(path, out_dir, level="normal", bbox=None, progress=None,
+               areas=True):
     """Stream a .osm.pbf into tiles. Returns (ways_written, tiles_touched)."""
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    import tilestore
-
     keep = LEVELS.get(level, LEVELS["normal"])
     store = tilestore.TileStore(out_dir)
 
@@ -201,15 +247,15 @@ def import_pbf(path, out_dir, level="normal", bbox=None, progress=None):
                                 vals = _packed_varints(v2)
                             elif f2 == 8:
                                 refs = _packed_varints(v2)
-                        hw = None
+                        tags = {}
                         for k, v in zip(keys, vals):
-                            if s(k) == "highway":
-                                hw = s(v)
-                                break
-                        if not hw:
+                            kn = s(k)
+                            if kn in TAG_KEYS:
+                                tags[kn] = s(v)
+                        if not tags:
                             continue
-                        cls = CLASS_OF.get(hw)
-                        if cls is None or cls not in keep:
+                        cls = class_of_tags(tags, keep, areas)
+                        if cls is None:
                             continue
                         pts = []
                         cur = 0
@@ -225,7 +271,7 @@ def import_pbf(path, out_dir, level="normal", bbox=None, progress=None):
                                 ways_out += len(pending)
                                 pending = []
                                 if progress:
-                                    progress(f"{ways_out} roads, {len(tiles)} tiles")
+                                    progress(f"{ways_out} ways, {len(tiles)} tiles")
         if pass_no == 1 and progress:
             progress(f"{len(nodes)} nodes indexed")
 
@@ -235,7 +281,7 @@ def import_pbf(path, out_dir, level="normal", bbox=None, progress=None):
 
     dt = time.time() - t0
     if progress:
-        progress(f"done: {ways_out} roads into {len(tiles)} tiles in {dt:.0f}s")
+        progress(f"done: {ways_out} ways into {len(tiles)} tiles in {dt:.0f}s")
     return ways_out, len(tiles)
 
 
@@ -245,6 +291,8 @@ def main():
     ap.add_argument("--out", default=None, help="tile dir (default ./maps)")
     ap.add_argument("--highways", default="normal", choices=list(LEVELS))
     ap.add_argument("--bbox", default=None, help="S,W,N,E to limit the import")
+    ap.add_argument("--no-areas", dest="areas", action="store_false",
+                    help="roads only: skip lakes, parks and rivers")
     a = ap.parse_args()
 
     out = a.out or os.path.join(os.path.dirname(os.path.abspath(__file__)), "maps")
@@ -265,7 +313,8 @@ def main():
     size_mb = os.path.getsize(a.pbf) / 1e6
     print(f"Importing {a.pbf} ({size_mb:.0f} MB), detail={a.highways}")
     print("This is a one-time job and is slow on a Pi Zero W — leave it running.")
-    import_pbf(a.pbf, out, a.highways, bbox, progress=lambda m: print("  " + m))
+    import_pbf(a.pbf, out, a.highways, bbox,
+               progress=lambda m: print("  " + m), areas=a.areas)
     return 0
 
 

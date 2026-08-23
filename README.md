@@ -13,6 +13,8 @@ A self-contained navigator display for Raspberry Pi OS Lite (console). Receives 
   data (~8 km ahead of the rider, refreshed every ~20 s / 800 m) instead
   of the whole trip up front, so the Pi's buffer never runs dry and
   neither side ever has to move the whole map at once
+- Lakes, parks and rivers are drawn under the roads, so the map reads as
+  somewhere rather than as a bare street grid (see "Land cover" below)
 - Tuned for the Pi Zero W: road geometry is simplified when it is stored,
   tiles decode on a background thread, route position is tracked
   incrementally rather than rescanned, and the redraw rate follows what is
@@ -62,6 +64,32 @@ Files of interest
 - region.mnosm — optional offline OSM region file (saved by the app)
 - icons/ — directory for UI icon assets
 
+Land cover
+
+Besides roads, tiles carry lakes (class 8), rivers (9) and parks, forest and
+grass (10). They are drawn as filled shapes underneath the road network, and
+they cost very little: there are only a handful of them in view at any time,
+they are simplified harder than roads (6 m rather than 2 m), and anything
+under ~25 m across is thrown away when the tile is written because it cannot
+be seen on a 480x320 panel anyway.
+
+- **RAM is not the constraint here** — the tile cache holds 12 decoded cells,
+  a few MB out of 512. What costs is the single ARMv6 core, so the map spends
+  at most `AREA_POINT_BUDGET` (1500) projected points per frame on land cover,
+  biggest shapes first. Somewhere pathological — a river delta, a national
+  park — drops its smallest shapes instead of dropping the frame rate. This is
+  also why buildings are *not* included: same code path, but ten to fifty
+  times the shape count in a city.
+- **Minimal map mode draws none of it**, staying route-only as before.
+- **Land cover comes from OSM ways only.** Lakes and forests mapped as
+  multipolygon *relations* are missed. Ordinary closed-way lakes, parks and
+  rivers — nearly everything that reads at this size — come through.
+- **Tiles you already have will not be refilled.** Gap detection asks whether
+  a tile exists, not what is in it, so ground already covered by a roads-only
+  import stays roads-only. Use `clear_map` from the phone and let the buffer
+  re-stream, or re-run `pbfimport.py`, to pull land cover into it.
+- `pbfimport.py --no-areas` restores the old roads-only import.
+
 Performance (Raspberry Pi Zero W)
 
 The Zero W has one 1 GHz ARMv6 core to share between drawing, the phone
@@ -70,8 +98,8 @@ link and tile streaming, so the display is built around not wasting it:
 - **Install numpy** (`sudo apt install python3-numpy`). It is optional, but
   without it every frame is converted to the panel's pixel format the slow
   way. The app prints a warning at startup if it is missing.
-- **Tile geometry is simplified when stored** (2 m tolerance), so the draw
-  loop projects far fewer points than OSM ships.
+- **Tile geometry is simplified when stored** (2 m tolerance for roads, 6 m
+  for land cover), so the draw loop projects far fewer points than OSM ships.
 - **Tiles decode on a background thread.** A tile that is not resident yet
   is skipped for a frame or two rather than stalling the UI on disk I/O.
 - **Position along the route is tracked incrementally**, and distances come
