@@ -71,7 +71,7 @@ Tiles are append-only. A second download over the same cell appends rather than 
 
 Not a whole-route download. The Pi keeps a window around the rider — `BUFFER_AHEAD_KM = 8.0`, `BUFFER_BEHIND_KM = 1.5` — and re-checks coverage as they advance (`maybe_stream_buffer` → `report_map_gaps`, throttled by `GAP_CHECK_MIN_S`/`GAP_CHECK_MOVE_M`). Missing tiles are merged into a few large bounding boxes and sent as `map_gaps`; [GapFiller.java](android/app/src/main/java/com/motonav/GapFiller.java) fetches exactly those.
 
-`BUFFER_AHEAD_KM` exists **twice** — [motonav.py:2530](motonav.py#L2530) and [Router.java:41](android/app/src/main/java/com/motonav/Router.java#L41). Change both together; the comments in each say so.
+`BUFFER_AHEAD_KM` exists **twice** — [motonav.py:2555](motonav.py#L2555) and [Router.java:41](android/app/src/main/java/com/motonav/Router.java#L41). Change both together; the comments in each say so.
 
 ### Routing chain (phone)
 
