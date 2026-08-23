@@ -1,3 +1,55 @@
-.vscode
+# ── Python ───────────────────────────────────────────────────────────────
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ── Editors ──────────────────────────────────────────────────────────────
+.vscode/
+.DS_Store
+Thumbs.db
+
+# ── MotoNav runtime data (generated on the Pi, not source) ───────────────
+maps/
+region.mnosm
+touch_cal.conf
+rotation.conf
+*.osm.pbf
+
+# ── Android: Gradle ──────────────────────────────────────────────────────
+.gradle/
+build/
+captures/
+*.hprof
+
+# ── Android: local machine config (SDK paths, keystores) ─────────────────
+local.properties
+keystore.properties
+*.jks
+*.keystore
+
+# ── Android: build outputs ───────────────────────────────────────────────
+*.apk
+*.aab
+*.ap_
+*.aar
+*.dex
+*.class
+release/
+proguard/
+lint/
+*.log
+
+# ── Android: native / NDK ────────────────────────────────────────────────
+.cxx/
+obj/
+
+# ── Android Studio / IntelliJ ────────────────────────────────────────────
+.idea/
+*.iml
+*.ipr
+*.iws
+.navigation/
+freeline/
+freeline_project_description.json

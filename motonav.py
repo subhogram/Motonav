@@ -493,7 +493,6 @@ _pos_hint = {"gen": -1, "i": 0, "lat": None, "lon": None}
 _hint_lock = threading.Lock()
 ROUTE_HINT_ACCEPT_M = 250.0   # a windowed answer is only trusted this close
 
-# "minimal"  = Google mode: route only, everything else greyed right back
 # "detailed" = OSM mode: full street map from the downloaded region
 map_detail = "detailed"
 
@@ -1285,8 +1284,7 @@ def build_frame(screen, fonts, d, flash):
         text(screen, "ARRIVED", f_med, C["GREEN"], SPX // 2, info_y + int(6 * sc), "center")
         text(screen, "DESTINATION REACHED", f_lbl, C["MUTED"], SPX // 2, info_y + int(32 * sc), "center")
     elif not d["instruction"]:
-        text(screen, "WAITING FOR NAV", f_sm, C["MUTED"], SPX // 2, info_y + int(12 * sc), "center")
-        text(screen, "START GOOGLE MAPS", f_lbl, C["MUTED"], SPX // 2, info_y + int(34 * sc), "center")
+        text(screen, "WAITING FOR NAV", f_sm, C["MUTED"], SPX // 2, info_y + int(12 * sc), "center")        
     else:
         dv, du = fmt_distance(d["distance_m"])
         dw = f_big.size(dv)[0]
@@ -1548,8 +1546,7 @@ def _step_indices(pts, steps):
 def update_step_guidance(lat, lon):
     """
     Standalone turn-by-turn: work out where we are along the route and
-    which maneuver is next, then fill the nav display ourselves.
-    Used when the phone sent OSRM steps (no Google Maps needed).
+    which maneuver is next, then fill the nav display ourselves.    
     """
     if not STEP_MODE or lat is None:
         return
