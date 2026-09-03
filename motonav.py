@@ -4006,6 +4006,43 @@ def init_screen():
     return surface, fb
 
 
+BOOT_SPLASH_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), ICON_DIR, "boot-splash.jpg")
+BOOT_SPLASH_MIN_S = 1.5   # keep it up at least this long even if init is fast
+
+
+def show_boot_splash(fb):
+    """
+    Push the boot logo to the panel as the very first frame. Called right
+    after init_screen(), before fonts/network/threads spin up, so it covers
+    the gap between the systemd unit starting and the real UI's first frame
+    — including the ExecStartPre sleep in install_kiosk.sh. Best-effort: any
+    failure (missing file, bad JPEG) just skips the splash and boots on.
+
+    Returns the monotonic time the splash went up, so the caller can hold it
+    for BOOT_SPLASH_MIN_S before drawing over it — otherwise a fast boot can
+    flash it for a single frame.
+    """
+    try:
+        img = pygame.image.load(BOOT_SPLASH_PATH).convert()
+    except Exception as e:
+        print(f"boot splash: {e}")
+        return None
+    surface = pygame.Surface((SCREEN_W, SCREEN_H))
+    surface.fill((0, 0, 0))
+    iw, ih = img.get_size()
+    k = min(SCREEN_W / iw, SCREEN_H / ih)
+    nw, nh = max(1, int(iw * k)), max(1, int(ih * k))
+    scaled = pygame.transform.smoothscale(img, (nw, nh))
+    surface.blit(scaled, ((SCREEN_W - nw) // 2, (SCREEN_H - nh) // 2))
+    try:
+        fb.blit(surface)
+    except Exception as e:
+        print(f"boot splash: {e}")
+        return None
+    return time.monotonic()
+
+
 def main():
     global theme_mode, wifi_panel_open
     global kb_open, kb_target_ssid, kb_buffer, kb_shift, kb_page, KB_SHOW
@@ -4024,6 +4061,7 @@ def main():
     load_region()
     console.take()
     screen, fb = init_screen()
+    splash_at = show_boot_splash(fb)
     fonts = make_fonts()
 
     if DEMO:
@@ -4047,6 +4085,14 @@ def main():
     last_touch = 0.0          # when the UI was last poked, for frame pacing
     render_s = 1.0 / FPS_NAV  # measured cost of a frame, seeded optimistically
     next_draw = 0.0
+
+    # Thread startup above is non-blocking, so without this the boot splash
+    # would be replaced by the first real frame almost immediately. Skip the
+    # hold for --calibrate / --demo — those want the real UI right away.
+    if splash_at is not None and not CALIBRATE and not DEMO:
+        remaining = BOOT_SPLASH_MIN_S - (time.monotonic() - splash_at)
+        if remaining > 0:
+            time.sleep(remaining)
 
     if CALIBRATE:
         cal_active = True

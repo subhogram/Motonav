@@ -62,7 +62,9 @@ Environment variables (optional):
 Files of interest
 - motonav.py — main application
 - region.mnosm — optional offline OSM region file (saved by the app)
-- icons/ — directory for UI icon assets
+- icons/ — directory for UI icon assets, including `boot-splash.jpg` (shown
+  full-screen for a moment at startup, before the map UI takes over — replace
+  the file to change it, no code changes needed)
 
 Land cover
 
